@@ -1,0 +1,7 @@
+chroma_db/
+indexed_files.json
+venv/
+__pycache__/
+*.pyc
+.env
+*.pdf.bak
