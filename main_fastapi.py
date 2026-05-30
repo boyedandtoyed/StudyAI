@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
@@ -7,14 +7,25 @@ import json
 import os
 import requests
 import datetime
+import threading
 
-from gg import build_vectorstore, retrieve, stream_llm, OLLAMA_BASE_URL, LLM_MODEL, EMBED_MODEL, load_indexed_hashes
+from gg import (
+    build_vectorstore, retrieve, stream_llm,
+    OLLAMA_BASE_URL, LLM_MODEL, EMBED_MODEL,
+    load_indexed_hashes, save_indexed_hashes,
+    get_file_hash, index_pdf,
+)
 
 # ── SESSION MEMORY ────────────────────────────────────────
 session_store: dict = {}
 
 # ── VECTORSTORE ───────────────────────────────────────────
 collection = None
+
+# ── UPLOAD PROGRESS ───────────────────────────────────────
+upload_progress: dict = {}
+
+UPLOAD_DIR = "demo_pdfs"
 
 
 @asynccontextmanager
@@ -113,6 +124,47 @@ def stats():
         "document_count": len(indexed),
         "server_time": datetime.datetime.utcnow().isoformat() + "Z",
     }
+
+
+# ── UPLOAD HELPERS ───────────────────────────────────────
+def _run_indexing(filepath: str, filename: str):
+    def on_progress(pct: int):
+        upload_progress[filename] = pct
+
+    indexed_hashes = load_indexed_hashes()
+    current_hash = get_file_hash(filepath)
+    chunk_id_start = collection.count()
+    index_pdf(filepath, collection, chunk_id_start, progress_callback=on_progress)
+    indexed_hashes[filename] = current_hash
+    save_indexed_hashes(indexed_hashes)
+    upload_progress.pop(filename, None)
+
+
+# ── /upload ───────────────────────────────────────────────
+@app.post("/upload")
+async def upload_pdf(file: UploadFile = File(...)):
+    filename = file.filename
+    filepath = os.path.join(UPLOAD_DIR, filename)
+
+    contents = await file.read()
+    with open(filepath, "wb") as f:
+        f.write(contents)
+
+    upload_progress[filename] = 0
+    threading.Thread(target=_run_indexing, args=(filepath, filename), daemon=True).start()
+
+    return {"message": "Upload started", "filename": filename}
+
+
+# ── /upload-progress ──────────────────────────────────────
+@app.get("/upload-progress/{filename}")
+def get_upload_progress(filename: str):
+    if filename not in upload_progress:
+        return JSONResponse(
+            status_code=404,
+            content={"filename": filename, "message": "Not found or already complete"},
+        )
+    return {"filename": filename, "progress": upload_progress[filename], "complete": False}
 
 
 # ── /chat-stream (SSE) ────────────────────────────────────

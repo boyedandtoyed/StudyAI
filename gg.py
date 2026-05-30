@@ -133,10 +133,11 @@ def stream_llm(prompt):
 
 
 # ── INDEX A SINGLE PDF ───────────────────────────────────
-def index_pdf(pdf_path, collection, chunk_id_start):
+def index_pdf(pdf_path, collection, chunk_id_start, progress_callback=None):
     """
     Extract, chunk, embed, and store one PDF into ChromaDB.
     Returns the next available chunk_id after indexing.
+    progress_callback(pct: int) is called after each page, where pct is 0-100.
     """
     all_texts      = []
     all_embeddings = []
@@ -145,9 +146,10 @@ def index_pdf(pdf_path, collection, chunk_id_start):
     chunk_id       = chunk_id_start
 
     pages = extract_page_data(pdf_path)
+    total_pages = len(pages)
     source = os.path.basename(pdf_path)
 
-    for page_data in pages:
+    for page_index, page_data in enumerate(pages):
         page = page_data["page"]
 
         # ── TEXT CHUNKS ──
@@ -185,6 +187,9 @@ def index_pdf(pdf_path, collection, chunk_id_start):
                 })
                 chunk_id += 1
                 print(f"  [Image indexed] {source} p{page} image {img_index + 1}   ")
+
+        if progress_callback and total_pages > 0:
+            progress_callback(int((page_index + 1) / total_pages * 100))
 
     if all_texts:
         collection.add(
