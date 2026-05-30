@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
 import os
@@ -83,3 +84,15 @@ Format:
         })
 
     return {"answer": answer}
+
+
+# ── /clear-session ────────────────────────────────────────
+@app.delete("/clear-session/{session_id}")
+def clear_session(session_id: str):
+    if session_id not in session_store:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "Session not found"},
+        )
+    del session_store[session_id]
+    return {"success": True, "message": "Session cleared"}
