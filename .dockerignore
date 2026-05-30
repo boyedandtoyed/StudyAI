@@ -1,0 +1,4 @@
+chroma_db/
+indexed_files.json
+__pycache__/
+*.pdf
