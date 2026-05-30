@@ -6,8 +6,9 @@ from typing import Optional
 import json
 import os
 import requests
+import datetime
 
-from gg import build_vectorstore, retrieve, stream_llm, OLLAMA_BASE_URL, LLM_MODEL
+from gg import build_vectorstore, retrieve, stream_llm, OLLAMA_BASE_URL, LLM_MODEL, EMBED_MODEL, load_indexed_hashes
 
 # ── SESSION MEMORY ────────────────────────────────────────
 session_store: dict = {}
@@ -98,6 +99,20 @@ def clear_session(session_id: str):
         )
     del session_store[session_id]
     return {"success": True, "message": "Session cleared"}
+
+
+# ── /stats ───────────────────────────────────────────────
+@app.get("/stats")
+def stats():
+    indexed = list(load_indexed_hashes().keys())
+    return {
+        "model_name": LLM_MODEL,
+        "embed_model": EMBED_MODEL,
+        "total_chunks": collection.count(),
+        "indexed_documents": indexed,
+        "document_count": len(indexed),
+        "server_time": datetime.datetime.utcnow().isoformat() + "Z",
+    }
 
 
 # ── /chat-stream (SSE) ────────────────────────────────────
