@@ -43,6 +43,18 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
+# ── /health ───────────────────────────────────────────────
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+# ── /docs-list ────────────────────────────────────────────
+@app.get("/docs-list")
+def docs_list():
+    return {"documents": list(load_indexed_hashes().keys())}
+
+
 # ── REQUEST SCHEMA ────────────────────────────────────────
 class ChatRequest(BaseModel):
     question: str
