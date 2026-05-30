@@ -1,11 +1,13 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
+import json
 import os
+import requests
 
-from gg import build_vectorstore, retrieve, stream_llm
+from gg import build_vectorstore, retrieve, stream_llm, OLLAMA_BASE_URL, LLM_MODEL
 
 # ── SESSION MEMORY ────────────────────────────────────────
 session_store: dict = {}
@@ -96,3 +98,71 @@ def clear_session(session_id: str):
         )
     del session_store[session_id]
     return {"success": True, "message": "Session cleared"}
+
+
+# ── /chat-stream (SSE) ────────────────────────────────────
+@app.post("/chat-stream")
+def chat_stream(req: ChatRequest):
+    context = retrieve(collection, req.question)
+
+    history_section = ""
+    if req.session_id and req.session_id in session_store:
+        exchanges = session_store[req.session_id][-3:]
+        lines = []
+        for ex in exchanges:
+            lines.append(f"Student: {ex['question']}")
+            lines.append(f"Assistant: {ex['answer']}")
+        history_section = "\n=== CONVERSATION HISTORY ===\n" + "\n".join(lines) + "\n"
+
+    prompt = f"""You are a helpful study assistant. A student has asked a question.
+
+You have access to:
+1. Relevant text excerpts from the student's uploaded notes
+2. Descriptions of diagrams and images found in those notes (labeled as Diagram)
+3. Your own general knowledge
+
+Instructions:
+- Use the retrieved content first. Mention the source file and page number.
+- If a diagram description is relevant, reference it clearly.
+- If notes have partial info, supplement with your own knowledge and label it.
+- If nothing relevant is found, say "I could not find this in your uploaded notes, but based on my own knowledge:" and answer concisely.
+{history_section}
+=== RETRIEVED CONTENT ===
+{context}
+
+=== STUDENT QUESTION ===
+{req.question}
+
+Format:
+[From your notes]: ...
+[From general knowledge]: ... (only if needed)"""
+
+    def generate():
+        full_answer = []
+        payload = {
+            "model": LLM_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": True,
+        }
+        with requests.post(
+            f"{OLLAMA_BASE_URL}/api/chat", json=payload, stream=True
+        ) as r:
+            for line in r.iter_lines():
+                if line:
+                    chunk = json.loads(line)
+                    token = chunk.get("message", {}).get("content", "")
+                    if token:
+                        full_answer.append(token)
+                        yield f"data: {token}\n\n"
+
+        if req.session_id is not None:
+            answer = "".join(full_answer)
+            if req.session_id not in session_store:
+                session_store[req.session_id] = []
+            session_store[req.session_id].append(
+                {"question": req.question, "answer": answer}
+            )
+
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
