@@ -382,4 +382,5 @@ def run_pipeline(pdf_paths):
 
 # ─────────────────────────────────────────────
 # run through the folder named demo_pdf and add that to the list of run_pipeline generate it dinamically, we can add more pdfs to that folder
-run_pipeline([os.path.join("demo_pdfs", f) for f in os.listdir("demo_pdfs") if f.endswith(".pdf")])
+if __name__ == "__main__":
+    run_pipeline([os.path.join("demo_pdfs", f) for f in os.listdir("demo_pdfs") if f.endswith(".pdf")])
