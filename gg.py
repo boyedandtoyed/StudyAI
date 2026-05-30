@@ -5,6 +5,7 @@ import json
 import base64
 import chromadb
 import hashlib
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # ── CONFIG ──────────────────────────────────────────────
 OLLAMA_BASE_URL = "http://100.88.81.96:11434"
@@ -47,14 +48,9 @@ def save_indexed_hashes(hashes):
 
 
 # ── TEXT CHUNKING ────────────────────────────────────────
-def chunk_text(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = start + chunk_size
-        chunks.append(text[start:end])
-        start += chunk_size - overlap
-    return [c for c in chunks if c.strip()]
+def chunk_text(text: str) -> list[str]:
+    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    return splitter.split_text(text)
 
 
 # ── PDF EXTRACTION ───────────────────────────────────────
