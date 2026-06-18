@@ -1,9 +1,10 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 import json
+import re
 import os
 import requests
 import datetime
@@ -109,7 +110,7 @@ Format:
             "answer": answer,
         })
 
-    return {"answer": answer}
+    return {"answer": answer, "sources": []}
 
 
 # ── /clear-session ────────────────────────────────────────
@@ -165,7 +166,7 @@ async def upload_pdf(file: UploadFile = File(...)):
     upload_progress[filename] = 0
     threading.Thread(target=_run_indexing, args=(filepath, filename), daemon=True).start()
 
-    return {"message": "Upload started", "filename": filename}
+    return {"success": True, "message": "Upload started", "filename": filename}
 
 
 # ── /upload-progress ──────────────────────────────────────
@@ -176,7 +177,89 @@ def get_upload_progress(filename: str):
             status_code=404,
             content={"filename": filename, "message": "Not found or already complete"},
         )
-    return {"filename": filename, "progress": upload_progress[filename], "complete": False}
+    return {"percent": upload_progress[filename], "complete": False}
+
+
+# ── /docs/{filename} ─────────────────────────────────────
+@app.delete("/docs/{filename}")
+def delete_doc(filename: str):
+    try:
+        results = collection.get(where={"source": filename})
+        if results["ids"]:
+            collection.delete(ids=results["ids"])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete from index: {e}")
+
+    hashes = load_indexed_hashes()
+    if filename in hashes:
+        del hashes[filename]
+        save_indexed_hashes(hashes)
+
+    filepath = os.path.join(UPLOAD_DIR, filename)
+    if os.path.exists(filepath):
+        os.remove(filepath)
+
+    return {"success": True, "message": f"Deleted '{filename}' from index"}
+
+
+# ── /quiz ─────────────────────────────────────────────────
+@app.post("/quiz")
+def generate_quiz():
+    if collection.count() == 0:
+        raise HTTPException(status_code=400, detail="No documents indexed. Upload a PDF first.")
+
+    context = retrieve(collection, "key facts important concepts definitions diagrams examples")
+
+    prompt = f"""Based on the following study material, create exactly 3 multiple choice quiz questions to test a student's understanding.
+
+IMPORTANT: Respond with ONLY valid JSON. No explanations, no markdown code fences, no extra text before or after the JSON.
+
+Required format:
+{{"questions": [{{"question": "Question text?", "options": ["Option A", "Option B", "Option C", "Option D"], "correct_index": 0, "explanation": "Brief explanation why this answer is correct"}}]}}
+
+Rules:
+- Each question must have exactly 4 options
+- correct_index must be 0, 1, 2, or 3 (zero-based index of the correct option)
+- Questions must be answerable from the study material below
+- Do not add any text outside the JSON object
+
+Study Material:
+{context}
+
+JSON:"""
+
+    raw = stream_llm(prompt)
+    text = raw.strip()
+    text = re.sub(r'^```[\w]*\n?', '', text)
+    text = re.sub(r'\n?```$', '', text)
+    text = text.strip()
+
+    data = None
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            try:
+                data = json.loads(match.group())
+            except json.JSONDecodeError:
+                pass
+
+    if not data or "questions" not in data:
+        raise HTTPException(status_code=500, detail="LLM did not return valid JSON. Try again.")
+
+    for q in data["questions"]:
+        opts = q.get("options", [])
+        while len(opts) < 4:
+            opts.append("N/A")
+        q["options"] = opts[:4]
+        if not isinstance(q.get("correct_index"), int):
+            q["correct_index"] = 0
+        q["correct_index"] = max(0, min(3, q["correct_index"]))
+        if "explanation" not in q:
+            q["explanation"] = ""
+
+    return data
 
 
 # ── /chat-stream (SSE) ────────────────────────────────────
