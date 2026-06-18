@@ -8,8 +8,8 @@ import hashlib
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # ── CONFIG ──────────────────────────────────────────────
-OLLAMA_BASE_URL = "http://100.88.81.96:11434"
-LLM_MODEL       = "llama3.2:1b"
+OLLAMA_BASE_URL = "http://localhost:11434"
+LLM_MODEL       = "gemma4:26b"
 EMBED_MODEL     = "nomic-embed-text"
 VISION_MODEL    = "moondream"
 TOP_K_CHUNKS    = 5
