@@ -85,6 +85,12 @@ class QuizRequest(BaseModel):
     user_id: Optional[int] = None
 
 
+class QuizResultRequest(BaseModel):
+    user_id: int
+    total_questions: int
+    correct: int
+
+
 # ── PER-USER COLLECTION HELPER ───────────────────────────
 def get_collection_for_user(user_id: Optional[int]):
     """Return the global collection when user_id is None; otherwise open (and cache) the user's per-user ChromaDB collection. Raises 404 for an unknown user_id."""
@@ -353,6 +359,42 @@ JSON:"""
             q["explanation"] = ""
 
     return data
+
+
+# ── /quiz-result ──────────────────────────────────────────
+@app.post("/quiz-result")
+def record_quiz_result(req: QuizResultRequest):
+    user_data = user_store.get_user_data(req.user_id)
+    if user_data is None:
+        return JSONResponse(
+            status_code=404,
+            content={"success": False, "message": "User not found"},
+        )
+
+    user_data.setdefault("quiz_history", []).append({
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "total_questions": req.total_questions,
+        "correct": req.correct,
+    })
+    user_data["questions_answered_total"] = (
+        user_data.get("questions_answered_total", 0) + req.total_questions
+    )
+    user_data["questions_correct_total"] = (
+        user_data.get("questions_correct_total", 0) + req.correct
+    )
+
+    user_store.save_user_data(req.user_id, user_data)
+    return {"success": True}
+
+
+# ── /progress/{user_id} ───────────────────────────────────
+@app.get("/progress/{user_id}")
+def get_progress(user_id: int):
+    user_data = user_store.get_user_data(user_id)
+    if user_data is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    return {k: v for k, v in user_data.items() if k != "chroma_db_path"}
 
 
 # ── /chat-stream (SSE) ────────────────────────────────────
