@@ -314,23 +314,28 @@ def index_pdf(pdf_path, collection, chunk_id_start, progress_callback=None):
 
 
 # ── BUILD / LOAD VECTORSTORE ─────────────────────────────
-def build_vectorstore(pdf_paths):
+def build_vectorstore(pdf_paths, chroma_dir: str | None = None):
     """
     Smart vectorstore builder:
     - Creates ChromaDB on disk if it doesn't exist
     - Loads existing ChromaDB if it does exist
     - Only indexes NEW or CHANGED files — skips already-indexed ones
+
+    Pass `chroma_dir` to scope the store to a per-user folder; defaults to
+    the global CHROMA_DIR when omitted.
     """
     if isinstance(pdf_paths, str):
         pdf_paths = [pdf_paths]
 
-    # Always use persistent client — saves to CHROMA_DIR folder
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
+    target_dir = chroma_dir if chroma_dir is not None else CHROMA_DIR
+
+    # Always use persistent client — saves to target_dir folder
+    client = chromadb.PersistentClient(path=target_dir)
 
     # Get or create the collection
     try:
         collection = client.get_collection("study_notes")
-        print(f"  [Found existing vectorstore at '{CHROMA_DIR}']")
+        print(f"  [Found existing vectorstore at '{target_dir}']")
         existing_count = collection.count()
         print(f"  [Currently has {existing_count} chunks stored]")
     except Exception:
@@ -338,7 +343,7 @@ def build_vectorstore(pdf_paths):
             name="study_notes",
             metadata={"hnsw:space": "cosine"}
         )
-        print(f"  [Created new vectorstore at '{CHROMA_DIR}']")
+        print(f"  [Created new vectorstore at '{target_dir}']")
         existing_count = 0
 
     # Load record of which files have been indexed

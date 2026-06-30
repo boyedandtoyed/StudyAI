@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Body
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
@@ -18,12 +18,16 @@ from gg import (
     load_indexed_hashes, save_indexed_hashes,
     get_file_hash, index_pdf,
 )
+from backend import user_store
 
 # ── SESSION MEMORY ────────────────────────────────────────
 session_store: dict = {}
 
 # ── VECTORSTORE ───────────────────────────────────────────
 collection = None
+
+# Cache per-user collections so we don't re-open ChromaDB on every request.
+_user_collections: dict = {}
 
 # ── UPLOAD PROGRESS ───────────────────────────────────────
 upload_progress: dict = {}
@@ -40,6 +44,7 @@ async def lifespan(app: FastAPI):
         if f.endswith(".pdf")
     ]
     _, collection = build_vectorstore(pdf_paths)
+    user_store.init_user_store()
     yield
 
 
@@ -62,12 +67,73 @@ def docs_list():
 class ChatRequest(BaseModel):
     question: str
     session_id: Optional[str] = None
+    user_id: Optional[int] = None
+
+
+class RegisterRequest(BaseModel):
+    name: str
+    email: str
+    password: str
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class QuizRequest(BaseModel):
+    user_id: Optional[int] = None
+
+
+# ── PER-USER COLLECTION HELPER ───────────────────────────
+def get_collection_for_user(user_id: Optional[int]):
+    """Return the global collection when user_id is None; otherwise open (and cache) the user's per-user ChromaDB collection. Raises 404 for an unknown user_id."""
+    if user_id is None:
+        return collection
+
+    cached = _user_collections.get(user_id)
+    if cached is not None:
+        return cached
+
+    user_data = user_store.get_user_data(user_id)
+    if user_data is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    _, user_collection = build_vectorstore([], chroma_dir=user_data["chroma_db_path"])
+    _user_collections[user_id] = user_collection
+    return user_collection
+
+
+# ── /register ─────────────────────────────────────────────
+@app.post("/register")
+def register(req: RegisterRequest):
+    try:
+        user = user_store.create_user(req.name, req.email, req.password)
+    except ValueError as e:
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": str(e)},
+        )
+    return {"success": True, "user": user}
+
+
+# ── /login ────────────────────────────────────────────────
+@app.post("/login")
+def login(req: LoginRequest):
+    user = user_store.authenticate_user(req.email, req.password)
+    if user is None:
+        return JSONResponse(
+            status_code=401,
+            content={"success": False, "message": "Invalid email or password"},
+        )
+    return {"success": True, "user": user}
 
 
 # ── /chat ─────────────────────────────────────────────────
 @app.post("/chat")
 def chat(req: ChatRequest):
-    context = retrieve(collection, req.question)
+    user_collection = get_collection_for_user(req.user_id)
+    context = retrieve(user_collection, req.question)
 
     # Build conversation history from last 3 exchanges
     history_section = ""
@@ -144,22 +210,40 @@ def stats():
 
 
 # ── UPLOAD HELPERS ───────────────────────────────────────
-def _run_indexing(filepath: str, filename: str):
+def _run_indexing(filepath: str, filename: str, user_id: Optional[int] = None):
     def on_progress(pct: int):
         upload_progress[filename] = pct
 
+    target_collection = get_collection_for_user(user_id)
+
     indexed_hashes = load_indexed_hashes()
     current_hash = get_file_hash(filepath)
-    chunk_id_start = collection.count()
-    index_pdf(filepath, collection, chunk_id_start, progress_callback=on_progress)
+    chunk_id_start = target_collection.count()
+    index_pdf(filepath, target_collection, chunk_id_start, progress_callback=on_progress)
     indexed_hashes[filename] = current_hash
     save_indexed_hashes(indexed_hashes)
     upload_progress.pop(filename, None)
 
+    if user_id is not None:
+        user_data = user_store.get_user_data(user_id)
+        if user_data is not None:
+            user_data.setdefault("pdfs_uploaded", []).append({
+                "filename": filename,
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            })
+            user_store.save_user_data(user_id, user_data)
+
 
 # ── /upload ───────────────────────────────────────────────
 @app.post("/upload")
-async def upload_pdf(file: UploadFile = File(...)):
+async def upload_pdf(
+    file: UploadFile = File(...),
+    user_id: Optional[int] = Form(None),
+):
+    # Validate the user up front so we don't kick off a background thread for an unknown user_id.
+    if user_id is not None:
+        get_collection_for_user(user_id)
+
     filename = file.filename
     filepath = os.path.join(UPLOAD_DIR, filename)
 
@@ -168,7 +252,9 @@ async def upload_pdf(file: UploadFile = File(...)):
         f.write(contents)
 
     upload_progress[filename] = 0
-    threading.Thread(target=_run_indexing, args=(filepath, filename), daemon=True).start()
+    threading.Thread(
+        target=_run_indexing, args=(filepath, filename, user_id), daemon=True
+    ).start()
 
     return {"success": True, "message": "Upload started", "filename": filename}
 
@@ -208,11 +294,14 @@ def delete_doc(filename: str):
 
 # ── /quiz ─────────────────────────────────────────────────
 @app.post("/quiz")
-def generate_quiz():
-    if collection.count() == 0:
+def generate_quiz(req: Optional[QuizRequest] = Body(None)):
+    user_id = req.user_id if req else None
+    target_collection = get_collection_for_user(user_id)
+
+    if target_collection.count() == 0:
         raise HTTPException(status_code=400, detail="No documents indexed. Upload a PDF first.")
 
-    context = retrieve(collection, "key facts important concepts definitions diagrams examples")
+    context = retrieve(target_collection, "key facts important concepts definitions diagrams examples")
 
     prompt = f"""Based on the following study material, create exactly 3 multiple choice quiz questions to test a student's understanding.
 
@@ -269,7 +358,8 @@ JSON:"""
 # ── /chat-stream (SSE) ────────────────────────────────────
 @app.post("/chat-stream")
 def chat_stream(req: ChatRequest):
-    context = retrieve(collection, req.question)
+    user_collection = get_collection_for_user(req.user_id)
+    context = retrieve(user_collection, req.question)
 
     history_section = ""
     if req.session_id and req.session_id in session_store:
