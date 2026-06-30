@@ -17,6 +17,13 @@ CHUNK_SIZE      = 500
 CHUNK_OVERLAP   = 50
 CHROMA_DIR      = "./chroma_db"       # folder created next to your script
 HASH_FILE       = "./indexed_files.json"  # tracks which files are already indexed
+
+# ── LLM PROVIDER SWITCH ─────────────────────────────────
+LLM_PROVIDER             = "openrouter"  # "ollama" or "openrouter" — single switch
+OPENROUTER_API_KEY       = os.environ.get("OPENROUTER_API_KEY", "")
+OPENROUTER_BASE_URL      = "https://openrouter.ai/api/v1"
+OPENROUTER_MODEL         = "deepseek/deepseek-v4-flash"
+OPENROUTER_FALLBACK_MODEL = "google/gemini-2.5-flash-lite"
 # ────────────────────────────────────────────────────────
 
 
@@ -130,6 +137,57 @@ def stream_llm(prompt):
                 print(content, end="", flush=True)
                 full_response += content
     return full_response
+
+
+# ── OPENROUTER CALL ──────────────────────────────────────
+def call_llm_openrouter(prompt: str, use_fallback: bool = False) -> str:
+    if not OPENROUTER_API_KEY:
+        raise RuntimeError(
+            "OPENROUTER_API_KEY is not set. Export it in your shell, e.g. "
+            "`export OPENROUTER_API_KEY=\"sk-or-v1-...\"`, then restart the process."
+        )
+
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": OPENROUTER_FALLBACK_MODEL if use_fallback else OPENROUTER_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+
+    try:
+        resp = requests.post(
+            f"{OPENROUTER_BASE_URL}/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=60,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
+    except requests.RequestException:
+        if not use_fallback:
+            return call_llm_openrouter(prompt, use_fallback=True)
+        raise
+
+
+def get_llm_response(prompt: str) -> str:
+    """
+    Non-streaming LLM call that respects the LLM_PROVIDER switch.
+
+    Switch LLM_PROVIDER to "ollama" to fall back to fully local inference
+    if OpenRouter is unavailable or rate-limited.
+    """
+    if LLM_PROVIDER == "openrouter":
+        return call_llm_openrouter(prompt)
+
+    payload = {
+        "model": LLM_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+    }
+    response = requests.post(f"{OLLAMA_BASE_URL}/api/chat", json=payload)
+    return response.json()["message"]["content"]
 
 
 # ── INDEX A SINGLE PDF ───────────────────────────────────
