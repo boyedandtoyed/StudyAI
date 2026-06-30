@@ -190,6 +190,59 @@ def get_llm_response(prompt: str) -> str:
     return response.json()["message"]["content"]
 
 
+def stream_llm_openrouter(prompt: str):
+    """
+    Generator: stream tokens from OpenRouter as SSE chunks, yielding the
+    content string of each delta — matches what /chat-stream's generate()
+    accumulates and forwards.
+    """
+    if not OPENROUTER_API_KEY:
+        raise RuntimeError(
+            "OPENROUTER_API_KEY is not set. Export it in your shell, e.g. "
+            "`export OPENROUTER_API_KEY=\"sk-or-v1-...\"`, then restart the process."
+        )
+
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": OPENROUTER_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": True,
+    }
+
+    with requests.post(
+        f"{OPENROUTER_BASE_URL}/chat/completions",
+        headers=headers,
+        json=payload,
+        stream=True,
+        timeout=60,
+    ) as r:
+        for raw_line in r.iter_lines():
+            if not raw_line:
+                continue
+            line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else raw_line
+            if line.startswith(":"):  # OpenRouter keep-alive comment
+                continue
+            if not line.startswith("data:"):
+                continue
+            data = line[len("data:"):].strip()
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            token = (
+                chunk.get("choices", [{}])[0]
+                .get("delta", {})
+                .get("content", "")
+            )
+            if token:
+                yield token
+
+
 # ── INDEX A SINGLE PDF ───────────────────────────────────
 def index_pdf(pdf_path, collection, chunk_id_start, progress_callback=None):
     """

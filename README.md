@@ -237,6 +237,8 @@ Open `gg.py` and set your server IP at the top:
 OLLAMA_BASE_URL = "http://YOUR_TAILSCALE_IP:11434"
 ```
 
+To use OpenRouter instead of local Ollama inference, set the `OPENROUTER_API_KEY` environment variable and ensure `LLM_PROVIDER = "openrouter"` in `gg.py`. To fall back to fully local inference, set `LLM_PROVIDER = "ollama"`.
+
 ### 4. Run
 
 ```bash

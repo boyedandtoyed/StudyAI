@@ -11,8 +11,10 @@ import datetime
 import threading
 
 from gg import (
-    build_vectorstore, retrieve, stream_llm,
+    build_vectorstore, retrieve,
+    get_llm_response, stream_llm_openrouter,
     OLLAMA_BASE_URL, LLM_MODEL, EMBED_MODEL,
+    LLM_PROVIDER, OPENROUTER_MODEL,
     load_indexed_hashes, save_indexed_hashes,
     get_file_hash, index_pdf,
 )
@@ -100,7 +102,7 @@ Format:
 [From your notes]: ...
 [From general knowledge]: ... (only if needed)"""
 
-    answer = stream_llm(prompt)
+    answer = get_llm_response(prompt)
 
     if req.session_id is not None:
         if req.session_id not in session_store:
@@ -136,6 +138,8 @@ def stats():
         "indexed_documents": indexed,
         "document_count": len(indexed),
         "server_time": datetime.datetime.utcnow().isoformat() + "Z",
+        "llm_provider": LLM_MODEL if LLM_PROVIDER == "ollama" else OPENROUTER_MODEL,
+        "provider_type": LLM_PROVIDER,
     }
 
 
@@ -228,7 +232,7 @@ Study Material:
 
 JSON:"""
 
-    raw = stream_llm(prompt)
+    raw = get_llm_response(prompt)
     text = raw.strip()
     text = re.sub(r'^```[\w]*\n?', '', text)
     text = re.sub(r'\n?```$', '', text)
@@ -301,21 +305,27 @@ Format:
 
     def generate():
         full_answer = []
-        payload = {
-            "model": LLM_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "stream": True,
-        }
-        with requests.post(
-            f"{OLLAMA_BASE_URL}/api/chat", json=payload, stream=True
-        ) as r:
-            for line in r.iter_lines():
-                if line:
-                    chunk = json.loads(line)
-                    token = chunk.get("message", {}).get("content", "")
-                    if token:
-                        full_answer.append(token)
-                        yield f"data: {token}\n\n"
+
+        if LLM_PROVIDER == "openrouter":
+            for token in stream_llm_openrouter(prompt):
+                full_answer.append(token)
+                yield f"data: {token}\n\n"
+        else:
+            payload = {
+                "model": LLM_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": True,
+            }
+            with requests.post(
+                f"{OLLAMA_BASE_URL}/api/chat", json=payload, stream=True
+            ) as r:
+                for line in r.iter_lines():
+                    if line:
+                        chunk = json.loads(line)
+                        token = chunk.get("message", {}).get("content", "")
+                        if token:
+                            full_answer.append(token)
+                            yield f"data: {token}\n\n"
 
         if req.session_id is not None:
             answer = "".join(full_answer)
