@@ -5,7 +5,12 @@ import json
 import base64
 import chromadb
 import hashlib
+from dotenv import load_dotenv
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+# Load variables from a local .env file (e.g. OPENROUTER_API_KEY) into the
+# environment so they're available via os.environ below.
+load_dotenv()
 
 # ── CONFIG ──────────────────────────────────────────────
 OLLAMA_BASE_URL = "http://localhost:11434"

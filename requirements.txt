@@ -5,3 +5,4 @@ pymupdf
 chromadb
 requests
 langchain-text-splitters
+python-dotenv
