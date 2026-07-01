@@ -59,8 +59,16 @@ def health():
 
 # ── /docs-list ────────────────────────────────────────────
 @app.get("/docs-list")
-def docs_list():
-    return {"documents": list(load_indexed_hashes().keys())}
+def docs_list(user_id: Optional[int] = None):
+    if user_id is None:
+        return {"documents": list(load_indexed_hashes().keys())}
+
+    user_data = user_store.get_user_data(user_id)
+    if user_data is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    filenames = [entry["filename"] for entry in user_data.get("pdfs_uploaded", [])]
+    return {"documents": filenames}
 
 
 # ── REQUEST SCHEMA ────────────────────────────────────────
@@ -278,22 +286,32 @@ def get_upload_progress(filename: str):
 
 # ── /docs/{filename} ─────────────────────────────────────
 @app.delete("/docs/{filename}")
-def delete_doc(filename: str):
+def delete_doc(filename: str, user_id: Optional[int] = None):
+    target_collection = get_collection_for_user(user_id)
+
     try:
-        results = collection.get(where={"source": filename})
+        results = target_collection.get(where={"source": filename})
         if results["ids"]:
-            collection.delete(ids=results["ids"])
+            target_collection.delete(ids=results["ids"])
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete from index: {e}")
 
-    hashes = load_indexed_hashes()
-    if filename in hashes:
-        del hashes[filename]
-        save_indexed_hashes(hashes)
-
-    filepath = os.path.join(UPLOAD_DIR, filename)
-    if os.path.exists(filepath):
-        os.remove(filepath)
+    if user_id is None:
+        hashes = load_indexed_hashes()
+        if filename in hashes:
+            del hashes[filename]
+            save_indexed_hashes(hashes)
+        filepath = os.path.join(UPLOAD_DIR, filename)
+        if os.path.exists(filepath):
+            os.remove(filepath)
+    else:
+        user_data = user_store.get_user_data(user_id)
+        if user_data is not None:
+            user_data["pdfs_uploaded"] = [
+                entry for entry in user_data.get("pdfs_uploaded", [])
+                if entry.get("filename") != filename
+            ]
+            user_store.save_user_data(user_id, user_data)
 
     return {"success": True, "message": f"Deleted '{filename}' from index"}
 

@@ -397,10 +397,13 @@ def build_vectorstore(pdf_paths, chroma_dir: str | None = None):
 # ── RETRIEVE ─────────────────────────────────────────────
 def retrieve(collection, question):
     """Embed the question and find the TOP_K most relevant chunks."""
+    count = collection.count()
+    if count == 0:
+        return ""
     query_embedding = get_embedding(question)
     results = collection.query(
         query_embeddings=[query_embedding],
-        n_results=min(TOP_K_CHUNKS, collection.count())
+        n_results=min(TOP_K_CHUNKS, count)
     )
 
     chunks = results["documents"][0]
