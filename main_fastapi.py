@@ -91,6 +91,7 @@ class LoginRequest(BaseModel):
 
 class QuizRequest(BaseModel):
     user_id: Optional[int] = None
+    num_questions: int = 5
 
 
 class QuizResultRequest(BaseModel):
@@ -320,6 +321,7 @@ def delete_doc(filename: str, user_id: Optional[int] = None):
 @app.post("/quiz")
 def generate_quiz(req: Optional[QuizRequest] = Body(None)):
     user_id = req.user_id if req else None
+    n = max(1, min(20, req.num_questions if req else 5))
     target_collection = get_collection_for_user(user_id)
 
     if target_collection.count() == 0:
@@ -327,7 +329,7 @@ def generate_quiz(req: Optional[QuizRequest] = Body(None)):
 
     context = retrieve(target_collection, "key facts important concepts definitions diagrams examples")
 
-    prompt = f"""Based on the following study material, create exactly 3 multiple choice quiz questions to test a student's understanding.
+    prompt = f"""Based on the following study material, create exactly {n} multiple choice quiz questions to test a student's understanding.
 
 IMPORTANT: Respond with ONLY valid JSON. No explanations, no markdown code fences, no extra text before or after the JSON.
 
