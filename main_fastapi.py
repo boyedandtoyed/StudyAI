@@ -68,8 +68,13 @@ def docs_list(user_id: Optional[int] = None):
     if user_data is None:
         raise HTTPException(status_code=404, detail="User not found")
 
-    filenames = [entry["filename"] for entry in user_data.get("pdfs_uploaded", [])]
-    return {"documents": filenames}
+    # Return filename + upload timestamp so the client's PDF picker can show both.
+    return {
+        "documents": [
+            {"filename": entry["filename"], "timestamp": entry.get("timestamp")}
+            for entry in user_data.get("pdfs_uploaded", [])
+        ]
+    }
 
 
 # ── REQUEST SCHEMA ────────────────────────────────────────
@@ -96,16 +101,16 @@ class QuizRequest(BaseModel):
     source_pdf: Optional[str] = None
 
 
-class QuizResultRequest(BaseModel):
-    user_id: int
-    total_questions: int
-    correct: int
-
-
 class FlashcardRequest(BaseModel):
     user_id: int
     source_pdf: str
     count: int
+
+
+class FlashcardRevealRequest(BaseModel):
+    user_id: int
+    set_id: str
+    revealed_count: int
 
 
 _ALLOWED_FLASHCARD_COUNTS = {5, 10, 15, 20}
@@ -385,12 +390,52 @@ JSON:"""
     except CardJsonError:
         raise HTTPException(status_code=500, detail="LLM did not return valid JSON. Try again.")
 
+    # Persist the full quiz payload only when we have a user to attach it to.
+    # Anonymous /quiz calls (no user_id) keep working as before — the response
+    # just doesn't carry a quiz_id.
+    if user_id is not None:
+        quiz_id = _new_set_id("q")
+        created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        payload = {
+            "id": quiz_id,
+            "user_id": user_id,
+            "source_pdf": source_pdf,
+            "created_at": created_at,
+            "questions": data["questions"],
+        }
+        user_store.save_quiz_payload(user_id, quiz_id, payload)
+
+        user_data = user_store.get_user_data(user_id)
+        if user_data is not None:
+            user_data.setdefault("quiz_history", []).append({
+                "id": quiz_id,
+                "source_pdf": source_pdf,
+                "created_at": created_at,
+                "total_questions": len(data["questions"]),
+                "correct": None,
+            })
+            user_store.save_user_data(user_id, user_data)
+
+        return {
+            "id": quiz_id,
+            "source_pdf": source_pdf,
+            "created_at": created_at,
+            "questions": data["questions"],
+        }
+
     return data
 
 
 # ── /quiz-result ──────────────────────────────────────────
+class QuizResultWithIdRequest(BaseModel):
+    user_id: int
+    total_questions: int
+    correct: int
+    quiz_id: Optional[str] = None
+
+
 @app.post("/quiz-result")
-def record_quiz_result(req: QuizResultRequest):
+def record_quiz_result(req: QuizResultWithIdRequest):
     user_data = user_store.get_user_data(req.user_id)
     if user_data is None:
         return JSONResponse(
@@ -398,11 +443,25 @@ def record_quiz_result(req: QuizResultRequest):
             content={"success": False, "message": "User not found"},
         )
 
-    user_data.setdefault("quiz_history", []).append({
-        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "total_questions": req.total_questions,
-        "correct": req.correct,
-    })
+    history = user_data.setdefault("quiz_history", [])
+    updated_existing = False
+    if req.quiz_id:
+        for entry in history:
+            if entry.get("id") == req.quiz_id:
+                entry["total_questions"] = req.total_questions
+                entry["correct"] = req.correct
+                updated_existing = True
+                break
+
+    # Fall back to append-a-row if no id was sent, or if the id is unknown
+    # (old app builds don't send quiz_id — do not break them mid-sprint).
+    if not updated_existing:
+        history.append({
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "total_questions": req.total_questions,
+            "correct": req.correct,
+        })
+
     user_data["questions_answered_total"] = (
         user_data.get("questions_answered_total", 0) + req.total_questions
     )
@@ -505,6 +564,113 @@ JSON:"""
         "created_at": created_at,
         "cards": data["cards"],
     }
+
+
+# ── HISTORY, RETRIEVAL, DELETE ───────────────────────────
+def _sort_newest_first(entries: list) -> list:
+    """Return entries sorted by created_at (or legacy timestamp) desc.
+
+    Legacy quiz_history rows written before quizzes had ids only carry a
+    `timestamp` field — treat that as the sort key so old rows still show
+    up in the right place in the history screen.
+    """
+    def key(e: dict) -> str:
+        return e.get("created_at") or e.get("timestamp") or ""
+    return sorted(entries, key=key, reverse=True)
+
+
+def _load_user_or_404(user_id: int) -> dict:
+    user_data = user_store.get_user_data(user_id)
+    if user_data is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user_data
+
+
+@app.get("/quizzes/{user_id}")
+def list_quizzes(user_id: int):
+    user_data = _load_user_or_404(user_id)
+    return {"quizzes": _sort_newest_first(user_data.get("quiz_history", []))}
+
+
+@app.get("/quizzes/{user_id}/{quiz_id}")
+def get_quiz(user_id: int, quiz_id: str):
+    user_data = _load_user_or_404(user_id)
+    # Cross-check the id against this user's own index — file existence
+    # alone is not enough, since we never want user 2 to fetch user 1's
+    # quiz by guessing the id.
+    if not any(e.get("id") == quiz_id for e in user_data.get("quiz_history", [])):
+        raise HTTPException(status_code=404, detail="Quiz not found")
+    payload = user_store.load_quiz_payload(user_id, quiz_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Quiz not found")
+    return payload
+
+
+@app.delete("/quizzes/{user_id}/{quiz_id}")
+def delete_quiz(user_id: int, quiz_id: str):
+    user_data = _load_user_or_404(user_id)
+    history = user_data.get("quiz_history", [])
+    filtered = [e for e in history if e.get("id") != quiz_id]
+    if len(filtered) == len(history):
+        raise HTTPException(status_code=404, detail="Quiz not found")
+    user_data["quiz_history"] = filtered
+    user_store.save_user_data(user_id, user_data)
+    user_store.delete_quiz_payload(user_id, quiz_id)
+    return {"success": True}
+
+
+@app.get("/flashcards/{user_id}")
+def list_flashcard_sets(user_id: int):
+    user_data = _load_user_or_404(user_id)
+    return {"flashcard_sets": _sort_newest_first(user_data.get("flashcard_sets", []))}
+
+
+@app.get("/flashcards/{user_id}/{set_id}")
+def get_flashcard_set(user_id: int, set_id: str):
+    user_data = _load_user_or_404(user_id)
+    if not any(e.get("id") == set_id for e in user_data.get("flashcard_sets", [])):
+        raise HTTPException(status_code=404, detail="Flashcard set not found")
+    payload = user_store.load_flashcard_payload(user_id, set_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Flashcard set not found")
+    return payload
+
+
+@app.delete("/flashcards/{user_id}/{set_id}")
+def delete_flashcard_set(user_id: int, set_id: str):
+    user_data = _load_user_or_404(user_id)
+    sets = user_data.get("flashcard_sets", [])
+    filtered = [e for e in sets if e.get("id") != set_id]
+    if len(filtered) == len(sets):
+        raise HTTPException(status_code=404, detail="Flashcard set not found")
+    user_data["flashcard_sets"] = filtered
+    user_store.save_user_data(user_id, user_data)
+    user_store.delete_flashcard_payload(user_id, set_id)
+    return {"success": True}
+
+
+@app.post("/flashcard-reveal")
+def record_flashcard_reveal(req: FlashcardRevealRequest):
+    user_data = _load_user_or_404(req.user_id)
+    target = None
+    for entry in user_data.get("flashcard_sets", []):
+        if entry.get("id") == req.set_id:
+            target = entry
+            break
+    if target is None:
+        raise HTTPException(status_code=404, detail="Flashcard set not found")
+
+    # Client sends the running total; server takes max so re-taps don't
+    # double-count and network retries are idempotent.
+    prev = int(target.get("cards_revealed", 0))
+    new = max(prev, int(req.revealed_count))
+    delta = new - prev
+    target["cards_revealed"] = new
+    user_data["flashcards_revealed_total"] = (
+        user_data.get("flashcards_revealed_total", 0) + delta
+    )
+    user_store.save_user_data(req.user_id, user_data)
+    return {"success": True, "cards_revealed": new}
 
 
 # ── /progress/{user_id} ───────────────────────────────────
