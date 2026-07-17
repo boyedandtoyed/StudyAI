@@ -128,6 +128,75 @@ OLLAMA_BASE_URL = "http://YOUR_TAILSCALE_IP:11434"
 
 ---
 
+## Deployment (Sprint 7)
+
+The backend is published at **https://studyai.binodtiwari.com**. The Android app
+talks to this URL directly, so no Tailscale VPN is required on the phone.
+
+```
+Android phone (any network)
+        │  HTTPS
+        ▼
+Cloudflare edge  ──►  Cloudflare Tunnel (outbound from HP server; no open port)
+        │
+        ▼
+Nginx :80  (studyai.binodtiwari.com server block)
+        │
+        ▼
+uvicorn 127.0.0.1:8002  (managed by systemd unit `studyai.service`)
+```
+
+### File locations on the HP server
+
+| Artifact | Path | Repo copy |
+|---|---|---|
+| Nginx site | `/etc/nginx/sites-available/studyai` (symlinked in `sites-enabled`) | `deploy/nginx/studyai` |
+| Cloudflared config | `/etc/cloudflared/config.yml` | `deploy/cloudflared/config.yml` |
+| systemd unit | `/etc/systemd/system/studyai.service` | `deploy/systemd/studyai.service` |
+| Tunnel ID | `d61228a8-8e71-457b-988b-cbaacf646760` | — |
+
+The Nginx site sets `client_max_body_size 50M` so PDF uploads don't 413, disables
+buffering on `/chat-stream` so SSE tokens arrive incrementally, and raises
+`proxy_read_timeout` to 300s so long `/chat` and `/quiz` generations don't 504.
+The FastAPI `/chat-stream` handler also sets `X-Accel-Buffering: no` so streaming
+survives even if the Nginx tweak is ever lost.
+
+### Running the backend
+
+The backend is a systemd service. Do **not** launch uvicorn by hand — the service
+loads `.env` via `EnvironmentFile=` and restarts on failure.
+
+```bash
+sudo systemctl status  studyai   # health check
+sudo systemctl restart studyai   # after editing .env or the code
+sudo journalctl -u studyai -f    # tail logs
+```
+
+### Cloudflare 100s limit
+
+Cloudflare's free plan drops any single origin request that runs longer than
+~100 seconds. `/chat-stream` is fine because it emits tokens continuously.
+`/quiz` is not streamed — a very large quiz on a slow model can approach the
+limit. If quiz size grows past what fits inside 100 s, convert `/quiz` to stream
+questions one at a time.
+
+### Fallback: Tailscale
+
+The systemd unit binds uvicorn to `0.0.0.0:8002`, so the Tailscale IP still works
+if the tunnel or Cloudflare has an outage:
+
+```
+http://100.95.45.33:8002
+```
+
+Point the Android build at that URL and re-install. Once the tunnel is healthy,
+switch back to `https://studyai.binodtiwari.com`. To later harden the box and
+force all public traffic through the tunnel, change `--host 0.0.0.0` to
+`--host 127.0.0.1` in `start.sh` (do **not** do this before demo — it kills the
+Tailscale fallback).
+
+---
+
 ## RAG Pipeline — How It Works
 
 ### Indexing (runs once at startup)
