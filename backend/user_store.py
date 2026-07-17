@@ -184,13 +184,38 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
     return None
 
 
+def _apply_defaults(data: dict) -> bool:
+    """Fill in any missing top-level keys in-place using _USER_DATA_DEFAULTS.
+
+    Returns True iff at least one key was added, so the caller knows to
+    persist the healed dict.
+    """
+    changed = False
+    for key, default in _USER_DATA_DEFAULTS.items():
+        if key not in data:
+            data[key] = list(default) if isinstance(default, list) else default
+            changed = True
+    return changed
+
+
 def get_user_data(user_id: int) -> Optional[dict]:
-    """Load the user's per-user data blob. Returns None if the user folder or user_data.json does not exist."""
+    """Load the user's per-user data blob. Returns None if the user folder or user_data.json does not exist.
+
+    Any missing keys (new keys added by later versions of the schema) are
+    backfilled with safe defaults from _USER_DATA_DEFAULTS and the healed
+    file is written back to disk. This is idempotent — old accounts heal
+    themselves on the first read without needing a one-off migration.
+    """
     path = _user_data_path(user_id)
     if not path.exists():
         return None
     with open(path, "r") as f:
-        return json.load(f)
+        data = json.load(f)
+
+    if _apply_defaults(data):
+        _save_json_atomic(path, data)
+
+    return data
 
 
 def save_user_data(user_id: int, data: dict) -> None:
