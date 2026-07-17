@@ -1,0 +1,49 @@
+tunnel: d61228a8-8e71-457b-988b-cbaacf646760
+credentials-file: /home/blinded-christi/.cloudflared/d61228a8-8e71-457b-988b-cbaacf646760.json
+ingress:
+  - hostname: binodtiwari.com
+    service: http://localhost:3000
+
+  - hostname: documind.binodtiwari.com
+    path: /api/.*
+    service: http://localhost:8001
+  - hostname: documind.binodtiwari.com
+    path: /health
+    service: http://localhost:8001
+  - hostname: documind.binodtiwari.com
+    path: /docs
+    service: http://localhost:8001
+  - hostname: documind.binodtiwari.com
+    service: http://localhost:3010
+
+  - hostname: neuralforge.binodtiwari.com
+    service: http://localhost:3001
+
+  - hostname: pipelineguard.binodtiwari.com
+    service: http://localhost:3002
+
+  - hostname: researchcrew.binodtiwari.com
+    service: http://localhost:3003
+
+  - hostname: dataflowagent.binodtiwari.com
+    service: http://localhost:3004
+
+  - hostname: defectscope.binodtiwari.com
+    service: http://localhost:3005
+
+  - hostname: contractlens.binodtiwari.com
+    service: http://localhost:3006
+
+  - hostname: quantumshield.binodtiwari.com
+    service: http://localhost:3007
+
+  - hostname: modelforge.binodtiwari.com
+    service: http://localhost:3008
+
+  - hostname: mlpipelinex.binodtiwari.com
+    service: http://localhost:3009
+
+  - hostname: studyai.binodtiwari.com
+    service: http://localhost:80
+
+  - service: http_status:404
