@@ -1,10 +1,12 @@
 import fitz  # PyMuPDF
 import os
+import re
 import requests
 import json
 import base64
 import chromadb
 import hashlib
+from typing import Optional
 from dotenv import load_dotenv
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -449,6 +451,93 @@ Format:
 
     print("[Answer]\n")
     stream_llm(prompt)
+
+
+# ── CARD/QUESTION JSON VALIDATOR ─────────────────────────
+# Shared parser + validator for LLM-generated multiple-choice payloads.
+# Used by both /quiz and /flashcards — the two features have the same wire
+# shape (4-option items with a correct_index and explanation), so they share
+# one implementation to keep them from drifting apart.
+
+class CardJsonError(ValueError):
+    """Raised when an LLM card/question JSON response is malformed."""
+
+
+def parse_and_validate_card_json(
+    raw: str, expected_count: int, key: str = "questions"
+) -> dict:
+    """Parse an LLM response as a card-list JSON object and validate it.
+
+    Strips markdown code fences, tries strict json.loads first, then falls
+    back to extracting the outermost {...}. Rejects (rather than repairs)
+    responses that have the wrong item count, a wrong number of options,
+    or an out-of-range correct_index — callers regenerate on failure.
+    A missing explanation is treated as empty since it is not load-bearing.
+
+    Raises CardJsonError on any structural problem.
+    """
+    text = raw.strip()
+    text = re.sub(r"^```[\w]*\n?", "", text)
+    text = re.sub(r"\n?```$", "", text)
+    text = text.strip()
+
+    data = None
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if match:
+            try:
+                data = json.loads(match.group())
+            except json.JSONDecodeError:
+                pass
+
+    if not isinstance(data, dict) or key not in data or not isinstance(data[key], list):
+        raise CardJsonError(f"Response is not a JSON object with a '{key}' list")
+
+    items = data[key]
+    if len(items) != expected_count:
+        raise CardJsonError(
+            f"Expected {expected_count} items under '{key}', got {len(items)}"
+        )
+
+    for i, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise CardJsonError(f"Item {i} is not an object")
+        if not isinstance(item.get("question"), str) or not item["question"].strip():
+            raise CardJsonError(f"Item {i} missing 'question'")
+        opts = item.get("options")
+        if not isinstance(opts, list) or len(opts) != 4:
+            raise CardJsonError(f"Item {i} must have exactly 4 options")
+        ci = item.get("correct_index")
+        if not isinstance(ci, int) or ci < 0 or ci > 3:
+            raise CardJsonError(f"Item {i} correct_index out of range")
+        if not isinstance(item.get("explanation"), str):
+            item["explanation"] = ""
+
+    return data
+
+
+def generate_cards_with_retry(
+    prompt: str,
+    expected_count: int,
+    key: str = "questions",
+    max_attempts: int = 2,
+) -> dict:
+    """Ask the LLM for a card-list JSON payload, validating each attempt.
+
+    Retries once by default when the response is unparseable or fails the
+    structural checks. Raises CardJsonError if every attempt fails.
+    """
+    last_err: Optional[CardJsonError] = None
+    for _ in range(max_attempts):
+        raw = get_llm_response(prompt)
+        try:
+            return parse_and_validate_card_json(raw, expected_count, key)
+        except CardJsonError as e:
+            last_err = e
+            continue
+    raise last_err or CardJsonError("LLM produced invalid JSON")
 
 
 # ── GENERATE QUIZ ─────────────────────────────────────────

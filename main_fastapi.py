@@ -4,7 +4,6 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 import json
-import re
 import os
 import requests
 import datetime
@@ -17,6 +16,7 @@ from gg import (
     LLM_PROVIDER, OPENROUTER_MODEL,
     load_indexed_hashes, save_indexed_hashes,
     get_file_hash, index_pdf,
+    generate_cards_with_retry, CardJsonError,
 )
 from backend import user_store
 
@@ -347,36 +347,10 @@ Study Material:
 
 JSON:"""
 
-    raw = get_llm_response(prompt)
-    text = raw.strip()
-    text = re.sub(r'^```[\w]*\n?', '', text)
-    text = re.sub(r'\n?```$', '', text)
-    text = text.strip()
-
-    data = None
     try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        match = re.search(r'\{.*\}', text, re.DOTALL)
-        if match:
-            try:
-                data = json.loads(match.group())
-            except json.JSONDecodeError:
-                pass
-
-    if not data or "questions" not in data:
+        data = generate_cards_with_retry(prompt, expected_count=n, key="questions")
+    except CardJsonError:
         raise HTTPException(status_code=500, detail="LLM did not return valid JSON. Try again.")
-
-    for q in data["questions"]:
-        opts = q.get("options", [])
-        while len(opts) < 4:
-            opts.append("N/A")
-        q["options"] = opts[:4]
-        if not isinstance(q.get("correct_index"), int):
-            q["correct_index"] = 0
-        q["correct_index"] = max(0, min(3, q["correct_index"]))
-        if "explanation" not in q:
-            q["explanation"] = ""
 
     return data
 
