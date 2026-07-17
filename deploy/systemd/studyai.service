@@ -1,0 +1,15 @@
+[Unit]
+Description=StudyAI FastAPI Backend
+After=network.target
+
+[Service]
+Type=simple
+User=blinded-christi
+WorkingDirectory=/home/blinded-christi/Desktop/fast_api_study_ai/StudyAI
+EnvironmentFile=/home/blinded-christi/Desktop/fast_api_study_ai/StudyAI/.env
+ExecStart=/home/blinded-christi/Desktop/fast_api_study_ai/StudyAI/start.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
