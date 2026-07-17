@@ -1,0 +1,42 @@
+# StudyAI — public entry point behind Cloudflare Tunnel.
+# Deployed to /etc/nginx/sites-available/studyai and symlinked into sites-enabled.
+# Tunnel terminates TLS at Cloudflare's edge and delivers plain HTTP to localhost:80.
+
+server {
+    listen 80;
+    server_name studyai.binodtiwari.com;
+
+    # Lecture PDFs blow past the 1M default.
+    client_max_body_size 50M;
+
+    # LLM generation for /chat and /quiz can take tens of seconds. Do not 504.
+    proxy_read_timeout 300s;
+    proxy_send_timeout 300s;
+
+    # SSE endpoint: token-by-token streaming requires an unbuffered pipe end-to-end.
+    location = /chat-stream {
+        proxy_pass http://127.0.0.1:8002;
+        proxy_http_version 1.1;
+        proxy_set_header Connection '';
+        proxy_buffering off;
+        proxy_cache off;
+        chunked_transfer_encoding off;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header CF-Connecting-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8002;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header CF-Connecting-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+}
