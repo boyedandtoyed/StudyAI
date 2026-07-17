@@ -17,6 +17,7 @@ from gg import (
     load_indexed_hashes, save_indexed_hashes,
     get_file_hash, index_pdf,
     generate_cards_with_retry, CardJsonError,
+    random_chunks_from_source,
 )
 from backend import user_store
 
@@ -99,6 +100,16 @@ class QuizResultRequest(BaseModel):
     user_id: int
     total_questions: int
     correct: int
+
+
+class FlashcardRequest(BaseModel):
+    user_id: int
+    source_pdf: str
+    count: int
+
+
+_ALLOWED_FLASHCARD_COUNTS = {5, 10, 15, 20}
+_FLASHCARD_SAMPLE_BATCH = 15
 
 
 # ── PDF OWNERSHIP HELPER ─────────────────────────────────
@@ -401,6 +412,99 @@ def record_quiz_result(req: QuizResultRequest):
 
     user_store.save_user_data(req.user_id, user_data)
     return {"success": True}
+
+
+# ── /flashcards ───────────────────────────────────────────
+def _new_set_id(prefix: str) -> str:
+    return (
+        f"{prefix}_"
+        + datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
+    )
+
+
+@app.post("/flashcards")
+def generate_flashcards(req: FlashcardRequest):
+    if req.count not in _ALLOWED_FLASHCARD_COUNTS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"count must be one of {sorted(_ALLOWED_FLASHCARD_COUNTS)}",
+        )
+
+    _require_user_owns_pdf(req.user_id, req.source_pdf)
+    target_collection = get_collection_for_user(req.user_id)
+
+    batch = random_chunks_from_source(
+        target_collection, req.source_pdf, batch_size=_FLASHCARD_SAMPLE_BATCH
+    )
+    if not batch:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"No indexed content found for '{req.source_pdf}'. "
+                "It may still be uploading or the PDF is empty."
+            ),
+        )
+
+    context = "\n\n---\n\n".join(
+        f"[{c['meta'].get('source', '?')} p{c['meta'].get('page', '?')}]\n{c['text']}"
+        for c in batch
+    )
+
+    prompt = f"""Create exactly {req.count} multiple-choice flashcards from the study material below.
+
+IMPORTANT: Respond with ONLY valid JSON. No explanations, no markdown code fences, no extra text before or after the JSON.
+
+Required format:
+{{"cards": [{{"question": "Question text?", "options": ["Option A", "Option B", "Option C", "Option D"], "correct_index": 0, "explanation": "Brief explanation why this answer is correct"}}]}}
+
+Rules:
+- Produce exactly {req.count} cards
+- Each card has exactly 4 options
+- correct_index must be 0, 1, 2, or 3 (zero-based index of the correct option)
+- Cards must be answerable from the study material below
+- Do not add any text outside the JSON object
+
+Study material:
+{context}
+
+JSON:"""
+
+    try:
+        data = generate_cards_with_retry(
+            prompt, expected_count=req.count, key="cards"
+        )
+    except CardJsonError:
+        raise HTTPException(
+            status_code=500, detail="LLM did not return valid JSON. Try again."
+        )
+
+    set_id = _new_set_id("f")
+    created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    payload = {
+        "id": set_id,
+        "user_id": req.user_id,
+        "source_pdf": req.source_pdf,
+        "created_at": created_at,
+        "cards": data["cards"],
+    }
+    user_store.save_flashcard_payload(req.user_id, set_id, payload)
+
+    user_data = user_store.get_user_data(req.user_id)
+    user_data.setdefault("flashcard_sets", []).append({
+        "id": set_id,
+        "source_pdf": req.source_pdf,
+        "created_at": created_at,
+        "card_count": len(data["cards"]),
+        "cards_revealed": 0,
+    })
+    user_store.save_user_data(req.user_id, user_data)
+
+    return {
+        "id": set_id,
+        "source_pdf": req.source_pdf,
+        "created_at": created_at,
+        "cards": data["cards"],
+    }
 
 
 # ── /progress/{user_id} ───────────────────────────────────
