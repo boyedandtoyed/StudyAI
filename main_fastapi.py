@@ -712,10 +712,19 @@ def record_flashcard_reveal(req: FlashcardRevealRequest):
 # ── /progress/{user_id} ───────────────────────────────────
 @app.get("/progress/{user_id}")
 def get_progress(user_id: int):
+    """Return the user's progress summary.
+
+    Includes questions_answered_total / questions_correct_total for quizzes
+    and flashcards_revealed_total for flashcards, plus the flashcard_sets
+    and quiz_history indexes so the client can show a history screen from
+    one call. chroma_db_path is stripped — it's an internal file path.
+    """
     user_data = user_store.get_user_data(user_id)
     if user_data is None:
         raise HTTPException(status_code=404, detail="User not found")
 
+    # get_user_data() backfills any missing keys via the schema migration,
+    # so old accounts already report the new flashcard counters as 0 here.
     return {k: v for k, v in user_data.items() if k != "chroma_db_path"}
 
 
