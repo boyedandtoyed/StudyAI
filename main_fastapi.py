@@ -345,6 +345,42 @@ def delete_doc(filename: str, user_id: Optional[int] = None):
     return {"success": True, "message": f"Deleted '{filename}' from index"}
 
 
+# ── /documents/{user_id}/{filename} ──────────────────────
+@app.delete("/documents/{user_id}/{filename}")
+def delete_user_document(user_id: int, filename: str):
+    """Delete a PDF for a specific user: drops the file's chunks from the
+    user's ChromaDB collection and removes the pdfs_uploaded entry.
+
+    Quizzes and flashcard sets already generated from this PDF are
+    self-contained payload files and are INTENTIONALLY kept. History
+    should survive document deletion — don't 'clean them up' here.
+    """
+    user_data = _load_user_or_404(user_id)
+    owned = [e for e in user_data.get("pdfs_uploaded", []) if e.get("filename") == filename]
+    if not owned:
+        raise HTTPException(status_code=404, detail="Document not found for this user")
+
+    target_collection = get_collection_for_user(user_id)
+    try:
+        target_collection.delete(where={"source": filename})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete chunks: {e}")
+
+    user_data["pdfs_uploaded"] = [
+        e for e in user_data.get("pdfs_uploaded", []) if e.get("filename") != filename
+    ]
+    user_store.save_user_data(user_id, user_data)
+
+    filepath = os.path.join(UPLOAD_DIR, filename)
+    if os.path.exists(filepath):
+        try:
+            os.remove(filepath)
+        except OSError:
+            pass
+
+    return {"success": True, "message": f"Deleted '{filename}' for user {user_id}"}
+
+
 # ── /quiz ─────────────────────────────────────────────────
 @app.post("/quiz")
 def generate_quiz(req: Optional[QuizRequest] = Body(None)):
