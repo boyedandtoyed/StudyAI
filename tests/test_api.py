@@ -1,9 +1,21 @@
+import sys
 import uuid
+from pathlib import Path
 
 import pytest
 import requests
 
 BASE_URL = "http://localhost:8000"
+
+# Make backend/user_store importable so we can seed on-disk state directly
+# (server and tests share the Study_AI_users directory). Integration tests
+# that need a specific pre-condition — say, a flashcard set attributed to
+# user 1 — would otherwise have to run a real LLM-backed /flashcards call.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from backend import user_store  # noqa: E402
 
 
 def _register_unique_user(password="password123"):
@@ -179,3 +191,140 @@ def test_progress_endpoint():
 def test_progress_unknown_user():
     r = requests.get(f"{BASE_URL}/progress/99999")
     assert r.status_code == 404
+
+
+# ── Flashcards, history, and per-user isolation ──────────
+
+def _seed_flashcard_set(uid: int, set_id: str = "f_seed_test", card_count: int = 3) -> str:
+    """Seed a flashcard set directly on disk, bypassing the LLM. Used for
+    endpoint contract tests that shouldn't wait on real generation."""
+    ud = user_store.get_user_data(uid)
+    assert ud is not None
+    ud.setdefault("flashcard_sets", []).append({
+        "id": set_id,
+        "source_pdf": "seed.pdf",
+        "created_at": "2026-07-06T15:01:12Z",
+        "card_count": card_count,
+        "cards_revealed": 0,
+    })
+    user_store.save_user_data(uid, ud)
+    user_store.save_flashcard_payload(uid, set_id, {
+        "id": set_id,
+        "user_id": uid,
+        "source_pdf": "seed.pdf",
+        "created_at": "2026-07-06T15:01:12Z",
+        "cards": [
+            {"question": f"Q{i}", "options": ["a", "b", "c", "d"], "correct_index": 0, "explanation": ""}
+            for i in range(card_count)
+        ],
+    })
+    return set_id
+
+
+def test_flashcards_reject_invalid_count():
+    """count must be one of 5, 10, 15, 20 — server-side enforcement."""
+    user = _register_unique_user()
+    uid = user["user"]["id"]
+    r = requests.post(
+        f"{BASE_URL}/flashcards",
+        json={"user_id": uid, "source_pdf": "any.pdf", "count": 7},
+    )
+    assert r.status_code == 422
+
+
+def test_flashcards_reject_unowned_source_pdf():
+    """A user must not be able to point /flashcards at a filename they
+    didn't upload — even if some other user did."""
+    user = _register_unique_user()
+    uid = user["user"]["id"]
+    r = requests.post(
+        f"{BASE_URL}/flashcards",
+        json={"user_id": uid, "source_pdf": "not_my_document.pdf", "count": 5},
+    )
+    assert r.status_code == 404
+
+
+def test_flashcard_set_visible_only_to_owner():
+    """User 2 gets a 404 when trying to fetch user 1's set by id."""
+    u1 = _register_unique_user()
+    u2 = _register_unique_user()
+    uid1, uid2 = u1["user"]["id"], u2["user"]["id"]
+    set_id = _seed_flashcard_set(uid1, set_id=f"f_iso_{uuid.uuid4().hex[:8]}")
+
+    r = requests.get(f"{BASE_URL}/flashcards/{uid1}/{set_id}")
+    assert r.status_code == 200, r.text
+
+    r2 = requests.get(f"{BASE_URL}/flashcards/{uid2}/{set_id}")
+    assert r2.status_code == 404
+
+
+def test_flashcard_reveal_updates_progress_and_delete_removes_set():
+    """End-to-end for the reveal+delete flow: reveal bumps the running
+    total on the set and in /progress, and delete makes the set unfetchable
+    and drops it from the index."""
+    user = _register_unique_user()
+    uid = user["user"]["id"]
+    set_id = _seed_flashcard_set(uid, set_id=f"f_flow_{uuid.uuid4().hex[:8]}")
+
+    r = requests.post(
+        f"{BASE_URL}/flashcard-reveal",
+        json={"user_id": uid, "set_id": set_id, "revealed_count": 2},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["cards_revealed"] == 2
+
+    p = requests.get(f"{BASE_URL}/progress/{uid}").json()
+    assert p["flashcards_revealed_total"] == 2
+
+    # Idempotent re-taps: sending the same running total should not double-count.
+    requests.post(
+        f"{BASE_URL}/flashcard-reveal",
+        json={"user_id": uid, "set_id": set_id, "revealed_count": 2},
+    )
+    p2 = requests.get(f"{BASE_URL}/progress/{uid}").json()
+    assert p2["flashcards_revealed_total"] == 2
+
+    r = requests.delete(f"{BASE_URL}/flashcards/{uid}/{set_id}")
+    assert r.status_code == 200
+
+    r = requests.get(f"{BASE_URL}/flashcards/{uid}/{set_id}")
+    assert r.status_code == 404
+
+    r = requests.get(f"{BASE_URL}/flashcards/{uid}")
+    assert all(s.get("id") != set_id for s in r.json()["flashcard_sets"])
+
+
+def test_delete_document_leaves_quiz_history_intact():
+    """Quizzes generated from a PDF are self-contained payload files.
+    Deleting the source PDF should NOT delete their history."""
+    user = _register_unique_user()
+    uid = user["user"]["id"]
+
+    ud = user_store.get_user_data(uid)
+    assert ud is not None
+    ud["pdfs_uploaded"].append({"filename": "seed.pdf", "timestamp": "2026-07-06T14:00:00Z"})
+    quiz_id = f"q_seeded_{uuid.uuid4().hex[:8]}"
+    ud["quiz_history"].append({
+        "id": quiz_id,
+        "source_pdf": "seed.pdf",
+        "created_at": "2026-07-06T14:30:00Z",
+        "total_questions": 5,
+        "correct": 3,
+    })
+    user_store.save_user_data(uid, ud)
+    user_store.save_quiz_payload(uid, quiz_id, {
+        "id": quiz_id, "user_id": uid, "source_pdf": "seed.pdf",
+        "created_at": "2026-07-06T14:30:00Z",
+        "questions": [{"question": "Q", "options": ["a", "b", "c", "d"], "correct_index": 0, "explanation": ""}],
+    })
+
+    r = requests.delete(f"{BASE_URL}/documents/{uid}/seed.pdf")
+    assert r.status_code == 200, r.text
+
+    r = requests.get(f"{BASE_URL}/quizzes/{uid}")
+    assert r.status_code == 200
+    ids = [q.get("id") for q in r.json()["quizzes"]]
+    assert quiz_id in ids
+
+    r = requests.get(f"{BASE_URL}/quizzes/{uid}/{quiz_id}")
+    assert r.status_code == 200

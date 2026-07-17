@@ -92,3 +92,60 @@ def test_get_and_save_user_data(test_user):
 
     reloaded = user_store.get_user_data(uid)
     assert reloaded["questions_answered_total"] == 42
+
+
+def test_get_user_data_backfills_old_shape(test_user):
+    """An old-shape user_data.json (missing flashcard_sets and
+    flashcards_revealed_total) heals itself on the next read, without
+    losing the fields it already has."""
+    uid = test_user["user"]["id"]
+
+    # Simulate an on-disk file written by an older backend version.
+    old_shape = {
+        "user_id": uid,
+        "chroma_db_path": "/tmp/does-not-matter",
+        "pdfs_uploaded": [{"filename": "lecture1.pdf", "timestamp": "2026-01-01T00:00:00Z"}],
+        "quiz_history": [{"timestamp": "2026-01-02T00:00:00Z", "total_questions": 10, "correct": 8}],
+        "questions_answered_total": 10,
+        "questions_correct_total": 8,
+    }
+    user_store.save_user_data(uid, old_shape)
+
+    healed = user_store.get_user_data(uid)
+    assert healed is not None
+    assert healed["flashcard_sets"] == []
+    assert healed["flashcards_revealed_total"] == 0
+    # Existing fields are preserved.
+    assert healed["questions_answered_total"] == 10
+    assert healed["questions_correct_total"] == 8
+    assert healed["quiz_history"][0]["correct"] == 8
+    assert healed["pdfs_uploaded"][0]["filename"] == "lecture1.pdf"
+
+    # A second read is a no-op — the file already has the new keys.
+    healed_again = user_store.get_user_data(uid)
+    assert healed_again == healed
+
+
+def test_flashcard_payload_roundtrip(test_user):
+    uid = test_user["user"]["id"]
+    payload = {"id": "f_test", "cards": [{"question": "Q", "options": ["a", "b", "c", "d"], "correct_index": 0, "explanation": ""}]}
+    user_store.save_flashcard_payload(uid, "f_test", payload)
+
+    loaded = user_store.load_flashcard_payload(uid, "f_test")
+    assert loaded == payload
+
+    assert user_store.delete_flashcard_payload(uid, "f_test") is True
+    assert user_store.load_flashcard_payload(uid, "f_test") is None
+    assert user_store.delete_flashcard_payload(uid, "f_test") is False
+
+
+def test_quiz_payload_roundtrip(test_user):
+    uid = test_user["user"]["id"]
+    payload = {"id": "q_test", "questions": [{"question": "Q", "options": ["a", "b", "c", "d"], "correct_index": 1, "explanation": ""}]}
+    user_store.save_quiz_payload(uid, "q_test", payload)
+
+    loaded = user_store.load_quiz_payload(uid, "q_test")
+    assert loaded == payload
+
+    assert user_store.delete_quiz_payload(uid, "q_test") is True
+    assert user_store.load_quiz_payload(uid, "q_test") is None
