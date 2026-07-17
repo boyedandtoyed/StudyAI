@@ -1,5 +1,6 @@
 import fitz  # PyMuPDF
 import os
+import random
 import re
 import requests
 import json
@@ -397,19 +398,35 @@ def build_vectorstore(pdf_paths, chroma_dir: str | None = None):
 
 
 # ── RETRIEVE ─────────────────────────────────────────────
-def retrieve(collection, question):
-    """Embed the question and find the TOP_K most relevant chunks."""
+def retrieve(
+    collection,
+    question,
+    source_pdf: Optional[str] = None,
+    k: int = TOP_K_CHUNKS,
+):
+    """Embed the question and find the top-k most relevant chunks.
+
+    If source_pdf is given, retrieval is restricted to chunks whose
+    metadata `source` matches it — used by quiz and flashcards when the
+    student picks a specific PDF. Without it, retrieval spans everything
+    in the collection (existing chat behaviour).
+    """
     count = collection.count()
     if count == 0:
         return ""
     query_embedding = get_embedding(question)
-    results = collection.query(
-        query_embeddings=[query_embedding],
-        n_results=min(TOP_K_CHUNKS, count)
-    )
+    query_kwargs = {
+        "query_embeddings": [query_embedding],
+        "n_results": min(k, count),
+    }
+    if source_pdf:
+        query_kwargs["where"] = {"source": source_pdf}
+    results = collection.query(**query_kwargs)
 
-    chunks = results["documents"][0]
-    metas  = results["metadatas"][0]
+    docs = results.get("documents") or [[]]
+    metas = results.get("metadatas") or [[]]
+    chunks = docs[0] if docs else []
+    metas = metas[0] if metas else []
 
     context_parts = []
     for chunk, meta in zip(chunks, metas):
@@ -418,6 +435,26 @@ def retrieve(collection, question):
             f"[{label} — {meta['source']}, Page {meta['page']}]\n{chunk}"
         )
     return "\n\n---\n\n".join(context_parts)
+
+
+def random_chunks_from_source(
+    collection, source_pdf: str, batch_size: int
+) -> list[dict]:
+    """Return up to batch_size random chunks whose source metadata matches source_pdf.
+
+    Random selection (not similarity) — there is no query to be similar to
+    for flashcards. Returns fewer than batch_size if the PDF has fewer
+    chunks, and an empty list if the source is not present at all.
+    """
+    got = collection.get(where={"source": source_pdf})
+    docs = got.get("documents") or []
+    metas = got.get("metadatas") or []
+    pool = list(zip(docs, metas))
+    if not pool:
+        return []
+    take = min(batch_size, len(pool))
+    picks = random.sample(pool, take)
+    return [{"text": t, "meta": m} for t, m in picks]
 
 
 # ── ANSWER QUESTION ──────────────────────────────────────

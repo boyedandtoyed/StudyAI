@@ -92,12 +92,24 @@ class LoginRequest(BaseModel):
 class QuizRequest(BaseModel):
     user_id: Optional[int] = None
     num_questions: int = 5
+    source_pdf: Optional[str] = None
 
 
 class QuizResultRequest(BaseModel):
     user_id: int
     total_questions: int
     correct: int
+
+
+# ── PDF OWNERSHIP HELPER ─────────────────────────────────
+def _require_user_owns_pdf(user_id: int, source_pdf: str) -> None:
+    """404 if the user doesn't own a PDF with this filename. Never trust a client-supplied filename to be one the caller uploaded — this stops user 1 from targeting user 2's documents by guessing a name."""
+    user_data = user_store.get_user_data(user_id)
+    if user_data is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    owned = {e.get("filename") for e in user_data.get("pdfs_uploaded", [])}
+    if source_pdf not in owned:
+        raise HTTPException(status_code=404, detail="Source PDF not found for this user")
 
 
 # ── PER-USER COLLECTION HELPER ───────────────────────────
@@ -322,12 +334,22 @@ def delete_doc(filename: str, user_id: Optional[int] = None):
 def generate_quiz(req: Optional[QuizRequest] = Body(None)):
     user_id = req.user_id if req else None
     n = max(1, min(20, req.num_questions if req else 5))
+    source_pdf = req.source_pdf if req else None
     target_collection = get_collection_for_user(user_id)
+
+    if source_pdf:
+        if user_id is None:
+            raise HTTPException(status_code=400, detail="source_pdf requires user_id")
+        _require_user_owns_pdf(user_id, source_pdf)
 
     if target_collection.count() == 0:
         raise HTTPException(status_code=400, detail="No documents indexed. Upload a PDF first.")
 
-    context = retrieve(target_collection, "key facts important concepts definitions diagrams examples")
+    context = retrieve(
+        target_collection,
+        "key facts important concepts definitions diagrams examples",
+        source_pdf=source_pdf,
+    )
 
     prompt = f"""Based on the following study material, create exactly {n} multiple choice quiz questions to test a student's understanding.
 
