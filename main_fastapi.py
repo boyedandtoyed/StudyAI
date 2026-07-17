@@ -489,4 +489,10 @@ Format:
 
         yield "data: [DONE]\n\n"
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        # Nginx honours this per-response to skip buffering; belt-and-braces
+        # with the location-level proxy_buffering off in the site config.
+        headers={"X-Accel-Buffering": "no"},
+    )
