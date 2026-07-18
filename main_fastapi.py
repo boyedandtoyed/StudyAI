@@ -116,7 +116,9 @@ class QuizRequest(BaseModel):
 
 class FlashcardRequest(BaseModel):
     user_id: int
-    source_pdf: str
+    # source_pdf omitted / null -> generate from the user's whole collection,
+    # matching /quiz's existing "all documents" behavior.
+    source_pdf: Optional[str] = None
     count: int
 
 
@@ -538,20 +540,27 @@ def generate_flashcards(req: FlashcardRequest):
             detail=f"count must be one of {sorted(_ALLOWED_FLASHCARD_COUNTS)}",
         )
 
-    _require_user_owns_pdf(req.user_id, req.source_pdf)
+    # source_pdf=None means "all documents" — mirror /quiz. Only enforce
+    # ownership when the client actually named a specific file.
+    if req.source_pdf is not None:
+        _require_user_owns_pdf(req.user_id, req.source_pdf)
+    else:
+        # Still need to 404 unknown users up front so the empty-batch error
+        # below doesn't mask a bad user_id.
+        _load_user_or_404(req.user_id)
     target_collection = get_collection_for_user(req.user_id)
 
     batch = random_chunks_from_source(
         target_collection, req.source_pdf, batch_size=_FLASHCARD_SAMPLE_BATCH
     )
     if not batch:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"No indexed content found for '{req.source_pdf}'. "
-                "It may still be uploading or the PDF is empty."
-            ),
+        detail = (
+            f"No indexed content found for '{req.source_pdf}'. "
+            "It may still be uploading or the PDF is empty."
+        ) if req.source_pdf else (
+            "You have no indexed documents yet. Upload a PDF first."
         )
+        raise HTTPException(status_code=400, detail=detail)
 
     context = "\n\n---\n\n".join(
         f"[{c['meta'].get('source', '?')} p{c['meta'].get('page', '?')}]\n{c['text']}"

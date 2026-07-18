@@ -438,15 +438,16 @@ def retrieve(
 
 
 def random_chunks_from_source(
-    collection, source_pdf: str, batch_size: int
+    collection, source_pdf: Optional[str], batch_size: int
 ) -> list[dict]:
-    """Return up to batch_size random chunks whose source metadata matches source_pdf.
+    """Return up to batch_size random chunks. Filters to a specific PDF
+    when source_pdf is given; samples from the whole collection when None.
 
     Random selection (not similarity) — there is no query to be similar to
-    for flashcards. Returns fewer than batch_size if the PDF has fewer
-    chunks, and an empty list if the source is not present at all.
+    for flashcards. Returns fewer than batch_size if the pool is smaller,
+    and an empty list if the source (or the whole collection) is empty.
     """
-    got = collection.get(where={"source": source_pdf})
+    got = collection.get(where={"source": source_pdf}) if source_pdf else collection.get()
     docs = got.get("documents") or []
     metas = got.get("metadatas") or []
     pool = list(zip(docs, metas))
