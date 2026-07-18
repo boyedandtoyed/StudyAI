@@ -59,7 +59,16 @@ def health():
 
 
 # ── /docs-list ────────────────────────────────────────────
-@app.get("/docs-list")
+class DocEntry(BaseModel):
+    filename: str
+    timestamp: str
+
+
+class DocsListResponse(BaseModel):
+    documents: list[DocEntry]
+
+
+@app.get("/docs-list", response_model=DocsListResponse)
 def docs_list(user_id: Optional[int] = None):
     # user_id is required — kept Optional in the signature only so we can
     # respond with 400 instead of FastAPI's default 422 when it's missing.
@@ -70,10 +79,12 @@ def docs_list(user_id: Optional[int] = None):
     if user_data is None:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Return filename + upload timestamp so the client's PDF picker can show both.
+    # response_model=DocsListResponse enforces the shape on the way out —
+    # FastAPI validates every response, so this route physically cannot
+    # drift from its documented contract, and openapi.json is truthful.
     return {
         "documents": [
-            {"filename": entry["filename"], "timestamp": entry.get("timestamp")}
+            {"filename": entry["filename"], "timestamp": entry.get("timestamp", "")}
             for entry in user_data.get("pdfs_uploaded", [])
         ]
     }
