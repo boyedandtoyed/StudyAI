@@ -102,6 +102,12 @@ class ProgressResponse(BaseModel):
     flashcards_revealed_total: int
 
 
+class DocumentDeleteResponse(BaseModel):
+    deleted_document: str
+    deleted_quizzes: int
+    deleted_flashcard_sets: int
+
+
 @app.get("/docs-list", response_model=DocsListResponse)
 def docs_list(user_id: Optional[int] = None):
     # user_id is required — kept Optional in the signature only so we can
@@ -395,17 +401,24 @@ def delete_doc(filename: str, user_id: Optional[int] = None):
 
 
 # ── /documents/{user_id}/{filename} ──────────────────────
-@app.delete("/documents/{user_id}/{filename}")
+@app.delete(
+    "/documents/{user_id}/{filename}",
+    response_model=DocumentDeleteResponse,
+)
 def delete_user_document(user_id: int, filename: str):
-    """Delete a PDF for a specific user: drops the file's chunks from the
-    user's ChromaDB collection and removes the pdfs_uploaded entry.
+    """Delete a PDF for a specific user and cascade to derived content.
 
-    Quizzes and flashcard sets already generated from this PDF are
-    self-contained payload files and are INTENTIONALLY kept. History
-    should survive document deletion — don't 'clean them up' here.
+    Removes the file's chunks from the user's ChromaDB collection, the
+    pdfs_uploaded entry, and every quiz / flashcard set generated from
+    this PDF (both the payload file and the index entry). Progress
+    totals are recomputed from what remains — never decremented by a
+    computed delta — so the counters can't drift out of sync if
+    something upstream was ever slightly off.
     """
     user_data = _load_user_or_404(user_id)
-    owned = [e for e in user_data.get("pdfs_uploaded", []) if e.get("filename") == filename]
+    owned = any(
+        e.get("filename") == filename for e in user_data.get("pdfs_uploaded", [])
+    )
     if not owned:
         raise HTTPException(status_code=404, detail="Document not found for this user")
 
@@ -418,6 +431,35 @@ def delete_user_document(user_id: int, filename: str):
     user_data["pdfs_uploaded"] = [
         e for e in user_data.get("pdfs_uploaded", []) if e.get("filename") != filename
     ]
+
+    quiz_history = user_data.get("quiz_history", [])
+    doomed_quizzes = [e for e in quiz_history if e.get("source_pdf") == filename]
+    surviving_quizzes = [e for e in quiz_history if e.get("source_pdf") != filename]
+    for entry in doomed_quizzes:
+        qid = entry.get("id")
+        if qid:
+            user_store.delete_quiz_payload(user_id, qid)
+    user_data["quiz_history"] = surviving_quizzes
+
+    flashcard_sets = user_data.get("flashcard_sets", [])
+    doomed_sets = [e for e in flashcard_sets if e.get("source_pdf") == filename]
+    surviving_sets = [e for e in flashcard_sets if e.get("source_pdf") != filename]
+    for entry in doomed_sets:
+        sid = entry.get("id")
+        if sid:
+            user_store.delete_flashcard_payload(user_id, sid)
+    user_data["flashcard_sets"] = surviving_sets
+
+    user_data["questions_answered_total"] = sum(
+        int(e.get("total_questions") or 0) for e in surviving_quizzes
+    )
+    user_data["questions_correct_total"] = sum(
+        int(e.get("correct") or 0) for e in surviving_quizzes
+    )
+    user_data["flashcards_revealed_total"] = sum(
+        int(e.get("cards_revealed") or 0) for e in surviving_sets
+    )
+
     user_store.save_user_data(user_id, user_data)
 
     filepath = os.path.join(UPLOAD_DIR, filename)
@@ -427,7 +469,11 @@ def delete_user_document(user_id: int, filename: str):
         except OSError:
             pass
 
-    return {"success": True, "message": f"Deleted '{filename}' for user {user_id}"}
+    return {
+        "deleted_document": filename,
+        "deleted_quizzes": len(doomed_quizzes),
+        "deleted_flashcard_sets": len(doomed_sets),
+    }
 
 
 # ── /quiz ─────────────────────────────────────────────────
