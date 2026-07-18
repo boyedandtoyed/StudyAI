@@ -68,6 +68,40 @@ class DocsListResponse(BaseModel):
     documents: list[DocEntry]
 
 
+# ── /progress response schema ────────────────────────────
+# id / source_pdf / created_at are Optional because the /quiz-result fallback
+# path (used by old app builds that don't send quiz_id) appends legacy rows of
+# the shape {timestamp, total_questions, correct} with none of those fields.
+# source_pdf and correct are also Optional in the current path — a quiz can be
+# generated across all documents (no source_pdf), and correct is null until
+# /quiz-result is posted for that quiz.
+class QuizHistoryEntry(BaseModel):
+    id: Optional[str] = None
+    source_pdf: Optional[str] = None
+    created_at: Optional[str] = None
+    timestamp: Optional[str] = None
+    total_questions: int
+    correct: Optional[int] = None
+
+
+class FlashcardSetEntry(BaseModel):
+    id: str
+    source_pdf: Optional[str] = None
+    created_at: str
+    card_count: int
+    cards_revealed: int
+
+
+class ProgressResponse(BaseModel):
+    user_id: int
+    pdfs_uploaded: list[DocEntry]
+    quiz_history: list[QuizHistoryEntry]
+    flashcard_sets: list[FlashcardSetEntry]
+    questions_answered_total: int
+    questions_correct_total: int
+    flashcards_revealed_total: int
+
+
 @app.get("/docs-list", response_model=DocsListResponse)
 def docs_list(user_id: Optional[int] = None):
     # user_id is required — kept Optional in the signature only so we can
@@ -732,7 +766,7 @@ def record_flashcard_reveal(req: FlashcardRevealRequest):
 
 
 # ── /progress/{user_id} ───────────────────────────────────
-@app.get("/progress/{user_id}")
+@app.get("/progress/{user_id}", response_model=ProgressResponse)
 def get_progress(user_id: int):
     """Return the user's progress summary.
 
