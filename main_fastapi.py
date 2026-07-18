@@ -61,8 +61,10 @@ def health():
 # ── /docs-list ────────────────────────────────────────────
 @app.get("/docs-list")
 def docs_list(user_id: Optional[int] = None):
+    # user_id is required — kept Optional in the signature only so we can
+    # respond with 400 instead of FastAPI's default 422 when it's missing.
     if user_id is None:
-        return {"documents": list(load_indexed_hashes().keys())}
+        raise HTTPException(status_code=400, detail="user_id is required")
 
     user_data = user_store.get_user_data(user_id)
     if user_data is None:

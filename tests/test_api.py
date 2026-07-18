@@ -46,12 +46,27 @@ def test_stats():
         assert key in data, f"Missing key: {key}"
 
 
-def test_docs_list():
+def test_docs_list_requires_user_id():
+    """/docs-list is a per-user endpoint; a call with no user_id must return
+    400 (not FastAPI's default 422, not the old bare-string legacy shape)."""
     r = requests.get(f"{BASE_URL}/docs-list")
-    assert r.status_code == 200
+    assert r.status_code == 400, r.text
+    assert "user_id" in r.json().get("detail", "").lower()
+
+
+def test_docs_list_returns_per_user_shape():
+    """With a valid user_id the endpoint returns objects with filename +
+    timestamp — no bare-string fallback anywhere in the response."""
+    user = _register_unique_user()
+    uid = user["user"]["id"]
+    r = requests.get(f"{BASE_URL}/docs-list", params={"user_id": uid})
+    assert r.status_code == 200, r.text
     data = r.json()
-    assert "documents" in data
     assert isinstance(data["documents"], list)
+    for entry in data["documents"]:
+        assert isinstance(entry, dict)
+        assert "filename" in entry
+        assert "timestamp" in entry
 
 
 def test_chat_no_docs():
