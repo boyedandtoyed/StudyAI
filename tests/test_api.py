@@ -309,37 +309,227 @@ def test_flashcard_reveal_updates_progress_and_delete_removes_set():
     assert all(s.get("id") != set_id for s in r.json()["flashcard_sets"])
 
 
-def test_delete_document_leaves_quiz_history_intact():
-    """Quizzes generated from a PDF are self-contained payload files.
-    Deleting the source PDF should NOT delete their history."""
+def _seed_quiz(uid: int, source_pdf: str, quiz_id: str, total_questions: int = 5, correct: int = 3) -> str:
+    """Attach a quiz to a user directly on disk — bypasses the LLM so we can
+    test history/delete flows without waiting on real generation."""
+    ud = user_store.get_user_data(uid)
+    assert ud is not None
+    ud.setdefault("quiz_history", []).append({
+        "id": quiz_id,
+        "source_pdf": source_pdf,
+        "created_at": "2026-07-06T14:30:00Z",
+        "total_questions": total_questions,
+        "correct": correct,
+    })
+    ud["questions_answered_total"] = ud.get("questions_answered_total", 0) + total_questions
+    ud["questions_correct_total"] = ud.get("questions_correct_total", 0) + correct
+    user_store.save_user_data(uid, ud)
+    user_store.save_quiz_payload(uid, quiz_id, {
+        "id": quiz_id, "user_id": uid, "source_pdf": source_pdf,
+        "created_at": "2026-07-06T14:30:00Z",
+        "questions": [
+            {"question": f"Q{i}", "options": ["a", "b", "c", "d"], "correct_index": 0, "explanation": ""}
+            for i in range(total_questions)
+        ],
+    })
+    return quiz_id
+
+
+def _seed_flashcard_set_for(uid: int, source_pdf: str, set_id: str, card_count: int = 3, cards_revealed: int = 0) -> str:
+    """Like _seed_flashcard_set but with a caller-chosen source_pdf and reveal
+    count, so cascade-delete tests can control which sets belong to which PDF."""
+    ud = user_store.get_user_data(uid)
+    assert ud is not None
+    ud.setdefault("flashcard_sets", []).append({
+        "id": set_id,
+        "source_pdf": source_pdf,
+        "created_at": "2026-07-06T15:01:12Z",
+        "card_count": card_count,
+        "cards_revealed": cards_revealed,
+    })
+    ud["flashcards_revealed_total"] = ud.get("flashcards_revealed_total", 0) + cards_revealed
+    user_store.save_user_data(uid, ud)
+    user_store.save_flashcard_payload(uid, set_id, {
+        "id": set_id, "user_id": uid, "source_pdf": source_pdf,
+        "created_at": "2026-07-06T15:01:12Z",
+        "cards": [
+            {"question": f"Q{i}", "options": ["a", "b", "c", "d"], "correct_index": 0, "explanation": ""}
+            for i in range(card_count)
+        ],
+    })
+    return set_id
+
+
+def _seed_owned_pdf(uid: int, filename: str) -> None:
+    ud = user_store.get_user_data(uid)
+    assert ud is not None
+    if not any(e.get("filename") == filename for e in ud.get("pdfs_uploaded", [])):
+        ud.setdefault("pdfs_uploaded", []).append(
+            {"filename": filename, "timestamp": "2026-07-06T14:00:00Z"}
+        )
+        user_store.save_user_data(uid, ud)
+
+
+def test_document_usage_returns_accurate_counts():
+    """/usage counts quiz_history and flashcard_sets entries whose
+    source_pdf matches — without opening any payload file."""
+    user = _register_unique_user()
+    uid = user["user"]["id"]
+    _seed_owned_pdf(uid, "target.pdf")
+    _seed_owned_pdf(uid, "other.pdf")
+
+    _seed_quiz(uid, "target.pdf", f"q_use1_{uuid.uuid4().hex[:8]}")
+    _seed_quiz(uid, "target.pdf", f"q_use2_{uuid.uuid4().hex[:8]}")
+    _seed_quiz(uid, "other.pdf", f"q_useX_{uuid.uuid4().hex[:8]}")
+    _seed_flashcard_set_for(uid, "target.pdf", f"f_use1_{uuid.uuid4().hex[:8]}")
+
+    r = requests.get(f"{BASE_URL}/documents/{uid}/target.pdf/usage")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"quiz_count": 2, "flashcard_count": 1}
+
+
+def test_document_usage_404_for_other_users_file():
+    """/usage must 404 if the caller doesn't own that filename — no silent
+    zero-count response that could leak filename ownership."""
+    u1 = _register_unique_user()
+    u2 = _register_unique_user()
+    _seed_owned_pdf(u1["user"]["id"], "u1_only.pdf")
+
+    r = requests.get(f"{BASE_URL}/documents/{u2['user']['id']}/u1_only.pdf/usage")
+    assert r.status_code == 404
+
+
+def test_delete_document_cascades_to_quizzes_and_flashcards():
+    """Deleting a document must remove every quiz and flashcard set generated
+    from it — payload files must be gone from disk too, not just the index —
+    while leaving an unrelated document's content untouched."""
     user = _register_unique_user()
     uid = user["user"]["id"]
 
-    ud = user_store.get_user_data(uid)
-    assert ud is not None
-    ud["pdfs_uploaded"].append({"filename": "seed.pdf", "timestamp": "2026-07-06T14:00:00Z"})
-    quiz_id = f"q_seeded_{uuid.uuid4().hex[:8]}"
-    ud["quiz_history"].append({
-        "id": quiz_id,
-        "source_pdf": "seed.pdf",
-        "created_at": "2026-07-06T14:30:00Z",
-        "total_questions": 5,
-        "correct": 3,
-    })
-    user_store.save_user_data(uid, ud)
-    user_store.save_quiz_payload(uid, quiz_id, {
-        "id": quiz_id, "user_id": uid, "source_pdf": "seed.pdf",
-        "created_at": "2026-07-06T14:30:00Z",
-        "questions": [{"question": "Q", "options": ["a", "b", "c", "d"], "correct_index": 0, "explanation": ""}],
-    })
+    _seed_owned_pdf(uid, "target.pdf")
+    _seed_owned_pdf(uid, "keep.pdf")
 
-    r = requests.delete(f"{BASE_URL}/documents/{uid}/seed.pdf")
+    doomed_q1 = _seed_quiz(uid, "target.pdf", f"q_del1_{uuid.uuid4().hex[:8]}")
+    doomed_q2 = _seed_quiz(uid, "target.pdf", f"q_del2_{uuid.uuid4().hex[:8]}")
+    doomed_f1 = _seed_flashcard_set_for(uid, "target.pdf", f"f_del1_{uuid.uuid4().hex[:8]}")
+    kept_q = _seed_quiz(uid, "keep.pdf", f"q_keep_{uuid.uuid4().hex[:8]}")
+    kept_f = _seed_flashcard_set_for(uid, "keep.pdf", f"f_keep_{uuid.uuid4().hex[:8]}")
+
+    quiz_path_doomed_1 = user_store._payload_path(uid, user_store._QUIZ_SUBDIR, doomed_q1)
+    quiz_path_doomed_2 = user_store._payload_path(uid, user_store._QUIZ_SUBDIR, doomed_q2)
+    fc_path_doomed = user_store._payload_path(uid, user_store._FLASHCARD_SUBDIR, doomed_f1)
+    quiz_path_kept = user_store._payload_path(uid, user_store._QUIZ_SUBDIR, kept_q)
+    fc_path_kept = user_store._payload_path(uid, user_store._FLASHCARD_SUBDIR, kept_f)
+
+    assert quiz_path_doomed_1.exists() and quiz_path_doomed_2.exists() and fc_path_doomed.exists()
+    assert quiz_path_kept.exists() and fc_path_kept.exists()
+
+    r = requests.delete(f"{BASE_URL}/documents/{uid}/target.pdf")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body == {
+        "deleted_document": "target.pdf",
+        "deleted_quizzes": 2,
+        "deleted_flashcard_sets": 1,
+    }
+
+    assert not quiz_path_doomed_1.exists(), "doomed quiz payload still on disk"
+    assert not quiz_path_doomed_2.exists(), "doomed quiz payload still on disk"
+    assert not fc_path_doomed.exists(), "doomed flashcard payload still on disk"
+    assert quiz_path_kept.exists(), "unrelated quiz payload was wrongly deleted"
+    assert fc_path_kept.exists(), "unrelated flashcard payload was wrongly deleted"
+
+    quizzes = requests.get(f"{BASE_URL}/quizzes/{uid}").json()["quizzes"]
+    ids = {q.get("id") for q in quizzes}
+    assert doomed_q1 not in ids and doomed_q2 not in ids
+    assert kept_q in ids
+
+    sets = requests.get(f"{BASE_URL}/flashcards/{uid}").json()["flashcard_sets"]
+    sids = {s.get("id") for s in sets}
+    assert doomed_f1 not in sids
+    assert kept_f in sids
+
+
+def test_delete_document_recomputes_totals_from_survivors():
+    """Totals must be recomputed by summing surviving entries, not by
+    subtracting a computed delta from the pre-delete totals — otherwise a
+    single upstream drift would compound on every delete."""
+    user = _register_unique_user()
+    uid = user["user"]["id"]
+
+    _seed_owned_pdf(uid, "target.pdf")
+    _seed_owned_pdf(uid, "keep.pdf")
+
+    _seed_quiz(uid, "target.pdf", f"q_rt1_{uuid.uuid4().hex[:8]}", total_questions=5, correct=3)
+    _seed_quiz(uid, "target.pdf", f"q_rt2_{uuid.uuid4().hex[:8]}", total_questions=4, correct=2)
+    _seed_quiz(uid, "keep.pdf", f"q_rtk_{uuid.uuid4().hex[:8]}", total_questions=3, correct=1)
+    _seed_flashcard_set_for(uid, "target.pdf", f"f_rt1_{uuid.uuid4().hex[:8]}", card_count=5, cards_revealed=5)
+    _seed_flashcard_set_for(uid, "keep.pdf", f"f_rtk_{uuid.uuid4().hex[:8]}", card_count=5, cards_revealed=2)
+
+    # Deliberately corrupt the running totals so we can prove they were
+    # RECOMPUTED (not decremented) after the delete.
+    ud = user_store.get_user_data(uid)
+    ud["questions_answered_total"] = 999
+    ud["questions_correct_total"] = 999
+    ud["flashcards_revealed_total"] = 999
+    user_store.save_user_data(uid, ud)
+
+    r = requests.delete(f"{BASE_URL}/documents/{uid}/target.pdf")
     assert r.status_code == 200, r.text
 
-    r = requests.get(f"{BASE_URL}/quizzes/{uid}")
-    assert r.status_code == 200
-    ids = [q.get("id") for q in r.json()["quizzes"]]
-    assert quiz_id in ids
+    p = requests.get(f"{BASE_URL}/progress/{uid}").json()
+    assert p["questions_answered_total"] == 3
+    assert p["questions_correct_total"] == 1
+    assert p["flashcards_revealed_total"] == 2
 
-    r = requests.get(f"{BASE_URL}/quizzes/{uid}/{quiz_id}")
-    assert r.status_code == 200
+
+def test_delete_document_404_for_other_users_file():
+    """Deleting a document that isn't the user's own is a 404, not a silent
+    no-op — otherwise user 2 could quietly drop user 1's chunks by guessing
+    the filename."""
+    u1 = _register_unique_user()
+    u2 = _register_unique_user()
+    _seed_owned_pdf(u1["user"]["id"], "u1_only.pdf")
+
+    r = requests.delete(f"{BASE_URL}/documents/{u2['user']['id']}/u1_only.pdf")
+    assert r.status_code == 404
+
+
+def test_progress_contract_shape():
+    """/progress response_model enforcement: FastAPI would 500 on validation
+    failure, so a clean 200 with the documented top-level keys is the
+    contract test. Uses a fresh account so the shape is empty-but-typed."""
+    user = _register_unique_user()
+    uid = user["user"]["id"]
+
+    r = requests.get(f"{BASE_URL}/progress/{uid}")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    for key in (
+        "user_id", "pdfs_uploaded", "quiz_history", "flashcard_sets",
+        "questions_answered_total", "questions_correct_total",
+        "flashcards_revealed_total",
+    ):
+        assert key in data, f"Missing key: {key}"
+    assert "chroma_db_path" not in data
+    assert isinstance(data["pdfs_uploaded"], list)
+    assert isinstance(data["quiz_history"], list)
+    assert isinstance(data["flashcard_sets"], list)
+
+
+def test_progress_contract_shape_populated():
+    """Same contract test with real content in every list — proves the
+    response_model accepts source_pdf=null / correct=null (real quizzes and
+    flashcards can have those) and doesn't reject the whole response."""
+    user = _register_unique_user()
+    uid = user["user"]["id"]
+    _seed_owned_pdf(uid, "any.pdf")
+    _seed_quiz(uid, "any.pdf", f"q_cs1_{uuid.uuid4().hex[:8]}", total_questions=3, correct=0)
+    _seed_quiz(uid, None, f"q_cs2_{uuid.uuid4().hex[:8]}", total_questions=3, correct=0)
+    _seed_flashcard_set_for(uid, None, f"f_cs1_{uuid.uuid4().hex[:8]}", card_count=5, cards_revealed=0)
+
+    r = requests.get(f"{BASE_URL}/progress/{uid}")
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert len(data["quiz_history"]) == 2
+    assert len(data["flashcard_sets"]) == 1
