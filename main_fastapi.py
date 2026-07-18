@@ -102,6 +102,11 @@ class ProgressResponse(BaseModel):
     flashcards_revealed_total: int
 
 
+class DocumentUsageResponse(BaseModel):
+    quiz_count: int
+    flashcard_count: int
+
+
 class DocumentDeleteResponse(BaseModel):
     deleted_document: str
     deleted_quizzes: int
@@ -398,6 +403,36 @@ def delete_doc(filename: str, user_id: Optional[int] = None):
             user_store.save_user_data(user_id, user_data)
 
     return {"success": True, "message": f"Deleted '{filename}' from index"}
+
+
+# ── /documents/{user_id}/{filename}/usage ────────────────
+@app.get(
+    "/documents/{user_id}/{filename}/usage",
+    response_model=DocumentUsageResponse,
+)
+def document_usage(user_id: int, filename: str):
+    """Count quizzes and flashcard sets generated from this document.
+
+    Cheap by design: reads only the index in user_data.json, never opens
+    the individual quiz/flashcard payload files. Powers a client-side
+    confirmation dialog before a cascading delete.
+    """
+    user_data = _load_user_or_404(user_id)
+    owned = any(
+        e.get("filename") == filename for e in user_data.get("pdfs_uploaded", [])
+    )
+    if not owned:
+        raise HTTPException(status_code=404, detail="Document not found for this user")
+
+    quiz_count = sum(
+        1 for e in user_data.get("quiz_history", [])
+        if e.get("source_pdf") == filename
+    )
+    flashcard_count = sum(
+        1 for e in user_data.get("flashcard_sets", [])
+        if e.get("source_pdf") == filename
+    )
+    return {"quiz_count": quiz_count, "flashcard_count": flashcard_count}
 
 
 # ── /documents/{user_id}/{filename} ──────────────────────
