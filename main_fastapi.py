@@ -345,28 +345,51 @@ def stats():
 
 
 # ── UPLOAD HELPERS ───────────────────────────────────────
+def _register_uploaded_document(user_id: int, filename: str) -> None:
+    """Add `filename` to the user's pdfs_uploaded index. No-op if already present.
+
+    Called synchronously from /upload before the background indexer runs
+    so the doc shows up in /docs-list immediately — indexing can take
+    minutes and can fail transiently (Ollama timeout, ChromaDB lock),
+    but the file the user just uploaded should be visible either way.
+    """
+    user_data = user_store.get_user_data(user_id)
+    if user_data is None:
+        return
+    if any(e.get("filename") == filename for e in user_data.get("pdfs_uploaded", [])):
+        return
+    user_data.setdefault("pdfs_uploaded", []).append({
+        "filename": filename,
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    })
+    user_store.save_user_data(user_id, user_data)
+
+
 def _run_indexing(filepath: str, filename: str, user_id: Optional[int] = None):
+    """Background indexer. All errors are logged and swallowed so a failure
+    here doesn't leave upload_progress stuck (the client polls it forever)
+    and doesn't take down other background work in the process."""
     def on_progress(pct: int):
         upload_progress[filename] = pct
 
-    target_collection = get_collection_for_user(user_id)
-
-    indexed_hashes = load_indexed_hashes()
-    current_hash = get_file_hash(filepath)
-    chunk_id_start = target_collection.count()
-    index_pdf(filepath, target_collection, chunk_id_start, progress_callback=on_progress)
-    indexed_hashes[filename] = current_hash
-    save_indexed_hashes(indexed_hashes)
-    upload_progress.pop(filename, None)
-
-    if user_id is not None:
-        user_data = user_store.get_user_data(user_id)
-        if user_data is not None:
-            user_data.setdefault("pdfs_uploaded", []).append({
-                "filename": filename,
-                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            })
-            user_store.save_user_data(user_id, user_data)
+    try:
+        target_collection = get_collection_for_user(user_id)
+        chunk_id_start = target_collection.count()
+        index_pdf(filepath, target_collection, chunk_id_start, progress_callback=on_progress)
+        # Only mark hash as indexed on success — a transient failure should
+        # not cause the next upload of the same file to be skipped.
+        indexed_hashes = load_indexed_hashes()
+        indexed_hashes[filename] = get_file_hash(filepath)
+        save_indexed_hashes(indexed_hashes)
+    except Exception as e:  # noqa: BLE001 — background thread; must not propagate
+        print(
+            f"[index-error] user_id={user_id} file={filename!r}: {e!r}",
+            flush=True,
+        )
+    finally:
+        # Always pop so the client's /upload-progress polling terminates
+        # (returns 404 "already complete") even if indexing failed.
+        upload_progress.pop(filename, None)
 
 
 # ── /upload ───────────────────────────────────────────────
@@ -385,6 +408,11 @@ async def upload_pdf(
     contents = await file.read()
     with open(filepath, "wb") as f:
         f.write(contents)
+
+    # Register the doc synchronously so /docs-list shows it immediately —
+    # regardless of whether the background indexer succeeds.
+    if user_id is not None:
+        _register_uploaded_document(user_id, filename)
 
     upload_progress[filename] = 0
     threading.Thread(
