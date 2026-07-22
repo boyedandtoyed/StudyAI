@@ -34,7 +34,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import gg  # noqa: E402
 import main_fastapi  # noqa: E402
-from backend import user_store  # noqa: E402
+from backend import db, user_store  # noqa: E402
 
 
 @pytest.fixture
@@ -56,14 +56,12 @@ def test_user():
 
     yield {"id": uid, "email": email, "source_pdf": "seed.pdf"}
 
-    # ── teardown ──
-    folder = user_store._USERS_DIR / str(uid)
+    # ── teardown: CASCADE removes docs/quizzes/flashcards for this user ──
+    with db.connect() as conn:
+        conn.execute("DELETE FROM users WHERE id = ?", (uid,))
+    folder = db._USERS_DIR / str(uid)
     if folder.exists():
         shutil.rmtree(folder, ignore_errors=True)
-    with user_store._db_lock:
-        db = user_store._load_db()
-        db["users"] = [u for u in db["users"] if u["id"] != uid]
-        user_store._save_json_atomic(user_store._USERS_DB, db)
 
     # Drop the per-user chroma collection cache so a re-used uid doesn't
     # hand back a stale handle to the next test run.

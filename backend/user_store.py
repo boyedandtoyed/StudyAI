@@ -28,11 +28,10 @@ from typing import Optional
 
 from backend import db
 
-_USERS_DIR = db._USERS_DIR
-
 
 def _user_dir(user_id: int) -> Path:
-    return _USERS_DIR / str(user_id)
+    # Read db._USERS_DIR at call time so tests can monkeypatch it.
+    return db._USERS_DIR / str(user_id)
 
 
 def _chroma_dir(user_id: int) -> Path:
@@ -59,7 +58,7 @@ def _user_row_to_dict(row) -> dict:
 
 def init_user_store() -> None:
     """Create the storage root and the SQLite schema if either is missing. Idempotent — safe to call on every FastAPI startup."""
-    _USERS_DIR.mkdir(parents=True, exist_ok=True)
+    db._USERS_DIR.mkdir(parents=True, exist_ok=True)
     db.init_schema()
 
 

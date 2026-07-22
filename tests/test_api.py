@@ -15,7 +15,25 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from backend import user_store  # noqa: E402
+from backend import db, user_store  # noqa: E402
+
+
+def _quiz_payload_exists(uid: int, quiz_id: str) -> bool:
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT payload FROM quizzes WHERE id = ? AND user_id = ?",
+            (quiz_id, uid),
+        ).fetchone()
+    return row is not None and bool(row["payload"]) and row["payload"] != "{}"
+
+
+def _flashcard_payload_exists(uid: int, set_id: str) -> bool:
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT payload FROM flashcards WHERE id = ? AND user_id = ?",
+            (set_id, uid),
+        ).fetchone()
+    return row is not None and bool(row["payload"]) and row["payload"] != "{}"
 
 
 def _register_unique_user(password="password123"):
@@ -415,14 +433,11 @@ def test_delete_document_cascades_to_quizzes_and_flashcards():
     kept_q = _seed_quiz(uid, "keep.pdf", f"q_keep_{uuid.uuid4().hex[:8]}")
     kept_f = _seed_flashcard_set_for(uid, "keep.pdf", f"f_keep_{uuid.uuid4().hex[:8]}")
 
-    quiz_path_doomed_1 = user_store._payload_path(uid, user_store._QUIZ_SUBDIR, doomed_q1)
-    quiz_path_doomed_2 = user_store._payload_path(uid, user_store._QUIZ_SUBDIR, doomed_q2)
-    fc_path_doomed = user_store._payload_path(uid, user_store._FLASHCARD_SUBDIR, doomed_f1)
-    quiz_path_kept = user_store._payload_path(uid, user_store._QUIZ_SUBDIR, kept_q)
-    fc_path_kept = user_store._payload_path(uid, user_store._FLASHCARD_SUBDIR, kept_f)
-
-    assert quiz_path_doomed_1.exists() and quiz_path_doomed_2.exists() and fc_path_doomed.exists()
-    assert quiz_path_kept.exists() and fc_path_kept.exists()
+    # Post-SQLite: payload lives in the `payload` column of quizzes/flashcards.
+    # Existence == row present with non-empty payload.
+    assert _quiz_payload_exists(uid, doomed_q1) and _quiz_payload_exists(uid, doomed_q2)
+    assert _flashcard_payload_exists(uid, doomed_f1)
+    assert _quiz_payload_exists(uid, kept_q) and _flashcard_payload_exists(uid, kept_f)
 
     r = requests.delete(f"{BASE_URL}/documents/{uid}/target.pdf")
     assert r.status_code == 200, r.text
@@ -433,11 +448,11 @@ def test_delete_document_cascades_to_quizzes_and_flashcards():
         "deleted_flashcard_sets": 1,
     }
 
-    assert not quiz_path_doomed_1.exists(), "doomed quiz payload still on disk"
-    assert not quiz_path_doomed_2.exists(), "doomed quiz payload still on disk"
-    assert not fc_path_doomed.exists(), "doomed flashcard payload still on disk"
-    assert quiz_path_kept.exists(), "unrelated quiz payload was wrongly deleted"
-    assert fc_path_kept.exists(), "unrelated flashcard payload was wrongly deleted"
+    assert not _quiz_payload_exists(uid, doomed_q1), "doomed quiz row still in db"
+    assert not _quiz_payload_exists(uid, doomed_q2), "doomed quiz row still in db"
+    assert not _flashcard_payload_exists(uid, doomed_f1), "doomed flashcard row still in db"
+    assert _quiz_payload_exists(uid, kept_q), "unrelated quiz row was wrongly deleted"
+    assert _flashcard_payload_exists(uid, kept_f), "unrelated flashcard row was wrongly deleted"
 
     quizzes = requests.get(f"{BASE_URL}/quizzes/{uid}").json()["quizzes"]
     ids = {q.get("id") for q in quizzes}

@@ -41,8 +41,12 @@ from backend import db
 from backend.user_store import _legacy_id_for
 
 
-_USERS_DIR = db._USERS_DIR
-_USERS_DB_JSON = _USERS_DIR / "users_db.json"
+def _users_dir() -> Path:
+    return db._USERS_DIR
+
+
+def _users_db_json() -> Path:
+    return _users_dir() / "users_db.json"
 
 
 def _load_json(path: Path) -> dict:
@@ -77,10 +81,11 @@ def _preflight(conn) -> None:
 
 def _backup_tree() -> Path:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    dest = _USERS_DIR.parent / f"Study_AI_users_backup_{stamp}"
+    root = _users_dir()
+    dest = root.parent / f"Study_AI_users_backup_{stamp}"
     if dest.exists():
         raise SystemExit(f"Backup target already exists: {dest}")
-    shutil.copytree(_USERS_DIR, dest, symlinks=False)
+    shutil.copytree(root, dest, symlinks=False)
     return dest
 
 
@@ -120,7 +125,7 @@ def _migrate_users(conn, users_json: dict) -> int:
 
 def _migrate_user_content(conn, user_id: int) -> tuple:
     """Migrate one user's docs, quizzes, flashcards. Returns (docs, quizzes, flashcards) counts inserted."""
-    user_dir = _USERS_DIR / str(user_id)
+    user_dir = _users_dir() / str(user_id)
     user_data_path = user_dir / "user_data.json"
     if not user_data_path.exists():
         return (0, 0, 0)
@@ -284,8 +289,9 @@ def _expected_counts_from_json(user_ids: list) -> tuple:
     docs = 0
     quizzes = 0
     flashcards = 0
+    root = _users_dir()
     for uid in user_ids:
-        ud_path = _USERS_DIR / str(uid) / "user_data.json"
+        ud_path = root / str(uid) / "user_data.json"
         if not ud_path.exists():
             continue
         ud = _load_json(ud_path)
@@ -294,14 +300,14 @@ def _expected_counts_from_json(user_ids: list) -> tuple:
         history = ud.get("quiz_history", []) or []
         modern_ids_in_history = {h["id"] for h in history if h.get("id")}
         legacy_count = sum(1 for h in history if not h.get("id"))
-        quiz_dir = _USERS_DIR / str(uid) / "quizzes"
+        quiz_dir = root / str(uid) / "quizzes"
         file_ids = (
             {p.stem for p in quiz_dir.glob("*.json")} if quiz_dir.exists() else set()
         )
         quizzes += len(file_ids | modern_ids_in_history) + legacy_count
 
         set_ids_in_history = {s["id"] for s in ud.get("flashcard_sets", []) if s.get("id")}
-        fc_dir = _USERS_DIR / str(uid) / "flashcards"
+        fc_dir = root / str(uid) / "flashcards"
         set_file_ids = (
             {p.stem for p in fc_dir.glob("*.json")} if fc_dir.exists() else set()
         )
@@ -312,8 +318,9 @@ def _expected_counts_from_json(user_ids: list) -> tuple:
 
 def _archive_json(user_ids: list) -> None:
     """Move the migrated JSON files into <user_id>/_migrated_backup/. Nothing is deleted — kept until after the demo."""
+    root = _users_dir()
     for uid in user_ids:
-        udir = _USERS_DIR / str(uid)
+        udir = root / str(uid)
         if not udir.exists():
             continue
         stash = udir / "_migrated_backup"
@@ -328,23 +335,25 @@ def _archive_json(user_ids: list) -> None:
         if fc_dir.exists():
             shutil.move(str(fc_dir), stash / "flashcards")
     # Also stash the top-level users_db.json.
-    if _USERS_DB_JSON.exists():
-        top_stash = _USERS_DIR / "_migrated_backup"
+    top_json = _users_db_json()
+    if top_json.exists():
+        top_stash = root / "_migrated_backup"
         top_stash.mkdir(exist_ok=True)
-        shutil.move(str(_USERS_DB_JSON), top_stash / "users_db.json")
+        shutil.move(str(top_json), top_stash / "users_db.json")
 
 
 def main() -> None:
-    if not _USERS_DB_JSON.exists():
-        raise SystemExit(f"No users_db.json at {_USERS_DB_JSON} — nothing to migrate.")
+    top_json = _users_db_json()
+    if not top_json.exists():
+        raise SystemExit(f"No users_db.json at {top_json} — nothing to migrate.")
 
-    print(f"[migrate] Source: {_USERS_DIR}")
+    print(f"[migrate] Source: {_users_dir()}")
     backup = _backup_tree()
     print(f"[migrate] Backed up whole tree to: {backup}")
 
     db.init_schema()
 
-    users_json = _load_json(_USERS_DB_JSON)
+    users_json = _load_json(top_json)
     user_ids = [int(u["id"]) for u in users_json.get("users", [])]
 
     expected_docs, expected_quizzes, expected_flashcards = _expected_counts_from_json(user_ids)
