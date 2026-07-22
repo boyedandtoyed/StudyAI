@@ -487,3 +487,117 @@ def delete_flashcard_payload(user_id: int, set_id: str) -> bool:
             (set_id, user_id),
         )
         return cur.rowcount > 0
+
+
+# ── PER-OPERATION REPOSITORY API ─────────────────────────
+# Cleaner surface for future callers: one function per operation, no big
+# dict passed around. main_fastapi.py isn't switched over yet — the compat
+# functions above still cover its needs — but new call sites should prefer
+# these.
+
+def create_quiz(
+    user_id: int,
+    quiz_id: str,
+    source_pdf: Optional[str],
+    created_at: str,
+    questions: list,
+) -> None:
+    """Insert a new quiz. Payload column stores the full JSON exactly as returned to the client."""
+    payload = {
+        "id": quiz_id,
+        "user_id": user_id,
+        "source_pdf": source_pdf,
+        "created_at": created_at,
+        "questions": questions,
+    }
+    save_quiz_payload(user_id, quiz_id, payload)
+
+
+def get_quiz(user_id: int, quiz_id: str) -> Optional[dict]:
+    return load_quiz_payload(user_id, quiz_id)
+
+
+def list_quizzes(user_id: int) -> list:
+    """Return the quiz history index for a user, insertion order (oldest first).
+
+    Modern rows and legacy rows are rendered in their respective shapes —
+    same dispatch as get_user_data() uses.
+    """
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT id, source_pdf, created_at, total_questions, correct, is_legacy "
+            "FROM quizzes WHERE user_id = ? ORDER BY rowid ASC",
+            (user_id,),
+        ).fetchall()
+    return [_row_to_history_entry(r) for r in rows]
+
+
+def update_quiz_result(
+    user_id: int, quiz_id: str, total_questions: int, correct: int
+) -> bool:
+    """Set total_questions + correct on an existing quiz. Returns False if the row doesn't exist."""
+    with db.connect() as conn:
+        cur = conn.execute(
+            "UPDATE quizzes SET total_questions = ?, correct = ? "
+            "WHERE id = ? AND user_id = ?",
+            (int(total_questions), int(correct), quiz_id, user_id),
+        )
+        return cur.rowcount > 0
+
+
+def delete_quiz(user_id: int, quiz_id: str) -> bool:
+    return delete_quiz_payload(user_id, quiz_id)
+
+
+def create_flashcard_set(
+    user_id: int,
+    set_id: str,
+    source_pdf: Optional[str],
+    created_at: str,
+    cards: list,
+) -> None:
+    payload = {
+        "id": set_id,
+        "user_id": user_id,
+        "source_pdf": source_pdf,
+        "created_at": created_at,
+        "cards": cards,
+    }
+    save_flashcard_payload(user_id, set_id, payload)
+
+
+def get_flashcard_set(user_id: int, set_id: str) -> Optional[dict]:
+    return load_flashcard_payload(user_id, set_id)
+
+
+def list_flashcard_sets(user_id: int) -> list:
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT id, source_pdf, created_at, card_count, cards_revealed "
+            "FROM flashcards WHERE user_id = ? ORDER BY rowid ASC",
+            (user_id,),
+        ).fetchall()
+    return [_row_to_flashcard_entry(r) for r in rows]
+
+
+def update_flashcards_revealed(
+    user_id: int, set_id: str, revealed_count: int
+) -> Optional[int]:
+    """Bump cards_revealed to max(current, revealed_count). Idempotent under retries — same behavior as the /flashcard-reveal endpoint. Returns the new value, or None if the set doesn't exist."""
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT cards_revealed FROM flashcards WHERE id = ? AND user_id = ?",
+            (set_id, user_id),
+        ).fetchone()
+        if row is None:
+            return None
+        new_val = max(int(row["cards_revealed"]), int(revealed_count))
+        conn.execute(
+            "UPDATE flashcards SET cards_revealed = ? WHERE id = ? AND user_id = ?",
+            (new_val, set_id, user_id),
+        )
+        return new_val
+
+
+def delete_flashcard_set(user_id: int, set_id: str) -> bool:
+    return delete_flashcard_payload(user_id, set_id)
