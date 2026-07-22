@@ -36,6 +36,38 @@ upload_progress: dict = {}
 UPLOAD_DIR = "demo_pdfs"
 
 
+def _safe_upload_name(raw: Optional[str]) -> str:
+    """Strip any directory portion from a client-supplied filename.
+
+    Rejects empty, '.', '..', and names containing NUL. Preserves the
+    original name otherwise so it stays recognizable in the frontend —
+    e.g. 'Lecture 1.pdf' stays 'Lecture 1.pdf'.
+    """
+    if not isinstance(raw, str) or not raw:
+        raise HTTPException(status_code=400, detail="Missing filename")
+    name = os.path.basename(raw)
+    if not name or name in (".", "..") or "\x00" in name:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    return name
+
+
+def _upload_path(filename: str, user_id: Optional[int]) -> str:
+    """Resolve the on-disk path for an uploaded PDF.
+
+    Authenticated uploads land under demo_pdfs/<user_id>/<filename> so two
+    users can safely upload the same-named file without clobbering each
+    other. Anonymous uploads (the /docs demo path) keep the old flat
+    demo_pdfs/<filename> location. The parent directory is created on
+    demand — a fresh install just works.
+    """
+    if user_id is None:
+        parent = UPLOAD_DIR
+    else:
+        parent = os.path.join(UPLOAD_DIR, str(user_id))
+    os.makedirs(parent, exist_ok=True)
+    return os.path.join(parent, filename)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global collection
@@ -347,8 +379,8 @@ async def upload_pdf(
     if user_id is not None:
         get_collection_for_user(user_id)
 
-    filename = file.filename
-    filepath = os.path.join(UPLOAD_DIR, filename)
+    filename = _safe_upload_name(file.filename)
+    filepath = _upload_path(filename, user_id)
 
     contents = await file.read()
     with open(filepath, "wb") as f:
@@ -497,7 +529,7 @@ def delete_user_document(user_id: int, filename: str):
 
     user_store.save_user_data(user_id, user_data)
 
-    filepath = os.path.join(UPLOAD_DIR, filename)
+    filepath = _upload_path(filename, user_id)
     if os.path.exists(filepath):
         try:
             os.remove(filepath)
